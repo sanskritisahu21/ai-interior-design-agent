@@ -1,0 +1,12 @@
+# Core System: ZERO External Dependencies Required!
+# The entire autonomous agent, deterministic tools, evaluation harness, and web app
+# run 100% out-of-the-box using standard Python 3.9+ built-in standard library:
+# - sqlite3 (Database catalog access)
+# - json (BOQ schema serialization)
+# - http.server (Interactive web demo server)
+# - urllib (HTTP request handling)
+# - argparse (CLI argument routing)
+
+# Optional dependencies for extended test runner integration:
+pytest>=7.4.0
+requests>=2.31.0
