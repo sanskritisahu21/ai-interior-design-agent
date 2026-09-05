@@ -389,8 +389,25 @@ def evaluate_custom_test_case(test_case: Dict[str, Any]) -> Dict[str, Any]:
     return evaluate_case_scorecard(test_case, agent_output)
 
 
-def run_benchmark_scorecard() -> List[Dict[str, Any]]:
-    """Runs the full 25-case benchmark and returns all scorecard records."""
+SCORECARD_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_scorecard_cache.json")
+_BENCHMARK_CACHE = None
+
+
+def run_benchmark_scorecard(force_refresh: bool = False) -> List[Dict[str, Any]]:
+    """Runs the full 25-case benchmark and returns all scorecard records, with disk and memory caching."""
+    global _BENCHMARK_CACHE
+    if not force_refresh:
+        if _BENCHMARK_CACHE is not None:
+            return _BENCHMARK_CACHE
+        if os.path.exists(SCORECARD_CACHE_PATH):
+            try:
+                with open(SCORECARD_CACHE_PATH, "r", encoding="utf-8") as f:
+                    _BENCHMARK_CACHE = json.load(f)
+                    if _BENCHMARK_CACHE and len(_BENCHMARK_CACHE) == 25:
+                        return _BENCHMARK_CACHE
+            except Exception:
+                pass
+
     with open(GOLDEN_SET_PATH, "r", encoding="utf-8") as f:
         golden_set = json.load(f)
 
@@ -400,6 +417,14 @@ def run_benchmark_scorecard() -> List[Dict[str, Any]]:
         agent_output = agent.run(tc)
         row = evaluate_case_scorecard(tc, agent_output)
         scorecard_rows.append(row)
+
+    _BENCHMARK_CACHE = scorecard_rows
+    try:
+        with open(SCORECARD_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(scorecard_rows, f, indent=2)
+    except Exception:
+        pass
+
     return scorecard_rows
 
 
@@ -520,13 +545,16 @@ def record_chat_session_scorecard(session_id: str) -> Optional[Dict[str, Any]]:
     return row
 
 
-def get_all_scorecard_rows() -> List[Dict[str, Any]]:
+def get_all_scorecard_rows(force_refresh: bool = False) -> List[Dict[str, Any]]:
     """
     Returns all scorecard rows: any user chat sessions that have ended,
     followed by the 25 golden benchmark cases.
     """
-    user_rows = db.get_all_session_scorecards()
-    benchmark_rows = run_benchmark_scorecard()
+    try:
+        user_rows = db.get_all_session_scorecards()
+    except Exception:
+        user_rows = []
+    benchmark_rows = run_benchmark_scorecard(force_refresh=force_refresh)
     return user_rows + benchmark_rows
 
 

@@ -2093,16 +2093,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     async function loadScorecardData(forceReload = false) {
       const tbody = document.getElementById('scorecard-tbody');
       if (tbody && (forceReload || !scorecardLoaded)) {
-        tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding: 30px; color: var(--text-muted);">⏳ Executing & evaluating test cases across 13-stage pipeline...</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding: 30px; color: var(--text-muted);">⏳ Loading scorecard benchmark records...</td></tr>`;
       }
       try {
-        const res = await fetch('/api/scorecard');
+        const url = forceReload ? '/api/scorecard?force=true' : '/api/scorecard';
+        const res = await fetch(url);
         const data = await res.json();
-        if (data.scorecard_rows) {
+        if (data.scorecard_rows && data.scorecard_rows.length > 0) {
           allScorecardRows = data.scorecard_rows;
           scorecardLoaded = true;
           renderScorecardRows(allScorecardRows);
           updateScorecardKPIs(allScorecardRows);
+        } else if (data.error) {
+          if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding: 30px; color: #fb7185;">⚠️ Error: ${escapeHtml(data.error)}</td></tr>`;
+          }
         }
       } catch (err) {
         console.error("Failed to load scorecard:", err);
@@ -2698,30 +2703,39 @@ class AgentRequestHandler(http.server.SimpleHTTPRequestHandler):
                         briefs_map[b_id] = c
 
         elif parsed.path == "/api/scorecard":
-            import eval_scorecard
-            query_params = urllib.parse.parse_qs(parsed.query)
-            session_id = query_params.get("session_id", [None])[0]
-            brief_id = query_params.get("brief_id", [None])[0]
-            if session_id:
-                row = eval_scorecard.evaluate_chat_session(session_id)
-                res_data = {"scorecard": row, "markdown": eval_scorecard.generate_scorecard_markdown([row])}
-            elif brief_id:
-                with open(eval_scorecard.GOLDEN_SET_PATH, "r", encoding="utf-8") as f:
-                    golden_set = json.load(f)
-                matched = [tc for tc in golden_set if tc.get("brief_id") == brief_id or tc.get("test_id") == brief_id]
-                if matched:
-                    row = eval_scorecard.evaluate_custom_test_case(matched[0])
+            try:
+                import eval_scorecard
+                query_params = urllib.parse.parse_qs(parsed.query)
+                session_id = query_params.get("session_id", [None])[0]
+                brief_id = query_params.get("brief_id", [None])[0]
+                force_refresh = query_params.get("force", ["false"])[0].lower() in ["true", "1"]
+                if session_id:
+                    row = eval_scorecard.evaluate_chat_session(session_id)
                     res_data = {"scorecard": row, "markdown": eval_scorecard.generate_scorecard_markdown([row])}
+                elif brief_id:
+                    with open(eval_scorecard.GOLDEN_SET_PATH, "r", encoding="utf-8") as f:
+                        golden_set = json.load(f)
+                    matched = [tc for tc in golden_set if tc.get("brief_id") == brief_id or tc.get("test_id") == brief_id]
+                    if matched:
+                        row = eval_scorecard.evaluate_custom_test_case(matched[0])
+                        res_data = {"scorecard": row, "markdown": eval_scorecard.generate_scorecard_markdown([row])}
+                    else:
+                        res_data = {"error": f"Brief {brief_id} not found"}
                 else:
-                    res_data = {"error": f"Brief {brief_id} not found"}
-            else:
-                rows = eval_scorecard.get_all_scorecard_rows()
-                res_data = {"scorecard_rows": rows, "markdown": eval_scorecard.generate_scorecard_markdown(rows)}
+                    rows = eval_scorecard.get_all_scorecard_rows(force_refresh=force_refresh)
+                    res_data = {"scorecard_rows": rows, "markdown": eval_scorecard.generate_scorecard_markdown(rows)}
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(json.dumps(res_data).encode("utf-8"))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(res_data).encode("utf-8"))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e), "scorecard_rows": []}).encode("utf-8"))
             return
 
         self.send_error(404, "Endpoint not found")
@@ -2878,9 +2892,14 @@ def run_cli_brief(brief_id_or_file: str) -> None:
     print("=" * 80 + "\n")
 
 
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def start_server(port: int = 8080) -> None:
     server_address = ("", port)
-    httpd = socketserver.TCPServer(server_address, AgentRequestHandler)
+    httpd = ThreadedTCPServer(server_address, AgentRequestHandler)
     print("\n" + "=" * 80)
     print(f"🌐 SIYA AI INTERIOR DESIGN CONSULTANT — SERVER RUNNING")
     print("=" * 80)
