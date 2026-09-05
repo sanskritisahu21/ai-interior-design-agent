@@ -73,18 +73,66 @@ class CatalogAgent:
     def validate_style(self, user_style_input: str) -> Tuple[bool, Optional[str], List[str]]:
         """
         Validates user-requested style against database styles.
+        Supports case-insensitivity, hyphen-insensitivity (e.g. 'midcentury' -> 'Mid-Century'),
+        common abbreviations ('scandi', 'boho', 'mcm'), and token-level matching.
         Returns:
             (is_valid, matched_style_name, suggested_db_styles)
         """
         if not user_style_input:
             return False, None, CORE_DB_STYLES[:3]
 
-        lower_input = user_style_input.strip().lower()
+        raw = user_style_input.strip()
+        lower_input = raw.lower()
+        cleaned_input = re.sub(r"\b(style|look|aesthetic|vibe|theme|design|interior|please)\b", "", lower_input).strip()
+
+        def norm(text: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+        norm_input = norm(cleaned_input) or norm(lower_input)
+
+        # 1. Known popular style aliases and abbreviations
+        aliases = {
+            "midcentury": "Mid-Century",
+            "midcenturymodern": "Mid-Century",
+            "mcm": "Mid-Century",
+            "scandi": "Scandinavian",
+            "scandinavian": "Scandinavian",
+            "minimal": "Minimalist",
+            "minimalist": "Minimalist",
+            "minimalism": "Minimalist",
+            "boho": "Bohemian",
+            "bohemian": "Bohemian",
+            "contemporary": "Contemporary",
+            "modern": "Contemporary",
+            "industrial": "Industrial",
+            "traditional": "Traditional",
+            "classic": "Traditional",
+            "coastal": "Coastal",
+            "beach": "Coastal",
+            "japandi": "Minimalist",
+        }
+
+        # Check direct alias dictionary
+        if norm_input in aliases:
+            return True, aliases[norm_input], []
+
+        for alias_key, target_style in aliases.items():
+            if alias_key in norm_input or norm_input in alias_key:
+                return True, target_style, []
+
         all_styles = self.get_all_db_styles()
 
-        # Exact or substring match
+        # 2. Check normalized exact or substring match against all DB styles
         for s in all_styles:
-            if s.lower() == lower_input or s.lower() in lower_input or lower_input in s.lower():
+            ns = norm(s)
+            if ns and (ns == norm_input or ns in norm_input or norm_input in ns):
+                return True, s, []
+
+        # 3. Check token-level match (e.g. 'mid century' tokens ['mid', 'century'])
+        input_tokens = [w for w in re.split(r"[^a-z0-9]+", lower_input) if len(w) > 2]
+        for s in all_styles:
+            s_tokens = [w for w in re.split(r"[^a-z0-9]+", s.lower()) if len(w) > 2]
+            if any(t in s_tokens for t in input_tokens):
                 return True, s, []
 
         # Unsupported style: pick 3 representative DB styles as alternatives
