@@ -173,16 +173,34 @@ class ConversationAgent:
                 metadata["chips"] = ["Under ₹1.5 Lakhs", "Between ₹1L - ₹2.5L", "Around ₹2,00,000", "I don't have a budget"]
                 metadata["stage"] = "BUDGET"
             else:
-                # Partial dimensions received (e.g. length received, breadth/height missing)
-                missing_str = " and ".join(dim_res["missing_parts"])
+                # Partial dimensions received (e.g. length and breadth received, height missing)
+                l_cm = dim_res.get("length_cm")
+                w_cm = dim_res.get("width_cm")
+                h_cm = dim_res.get("height_cm")
+
                 db.update_session(
                     session_id,
                     db_path=self.db_path,
-                    length_cm=dim_res.get("length_cm"),
-                    width_cm=dim_res.get("width_cm"),
-                    height_cm=dim_res.get("height_cm")
+                    length_cm=l_cm,
+                    width_cm=w_cm,
+                    height_cm=h_cm
                 )
-                response_text = f"Thanks! I noted that. What is the {missing_str} of the room?"
+
+                if l_cm and w_cm and not h_cm:
+                    response_text = f"Got length and breadth ({l_cm} x {w_cm} cm). What is the height of your room?"
+                    metadata["chips"] = ["280 cm (Standard)", "300 cm", "9 feet", "10 feet"]
+                elif l_cm and not w_cm:
+                    response_text = f"Thanks! I noted length as {l_cm} cm. What is the breadth and height of the room?"
+                    metadata["chips"] = ["210 cm", "10 feet", "12 feet"]
+                elif w_cm and not l_cm:
+                    response_text = f"Thanks! I noted breadth as {w_cm} cm. What is the length and height of the room?"
+                    metadata["chips"] = ["200 cm", "12 feet", "15 feet"]
+                elif h_cm and not l_cm and not w_cm:
+                    response_text = f"Thanks! I noted height as {h_cm} cm. What is the length and breadth of the room?"
+                    metadata["chips"] = ["200 210 cm", "15 * 12 feet"]
+                else:
+                    missing_str = " and ".join(dim_res["missing_parts"])
+                    response_text = f"Thanks! I noted that. What is the {missing_str} of the room?"
 
         # -------------------------------------------------------------
         # STAGE 4: BUDGET
