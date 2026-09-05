@@ -173,10 +173,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     /* Main Chat Layout */
     .app-container {
-      flex: 1;
+      flex: 1 1 0;
       display: grid;
       grid-template-columns: 320px 1fr;
       height: calc(100vh - 65px);
+      max-height: calc(100vh - 65px);
+      min-height: 0;
       overflow: hidden;
     }
 
@@ -310,6 +312,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: flex;
       flex-direction: column;
       height: 100%;
+      min-height: 0;
+      max-height: 100%;
+      overflow: hidden;
       background: transparent;
       position: relative;
     }
@@ -368,14 +373,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     /* Chat Messages Stream */
     .chat-messages {
-      flex: 1;
+      flex: 1 1 0;
       min-height: 0;
-      padding: 24px 28px 40px 28px;
-      overflow-y: auto;
+      height: 100%;
+      padding: 24px 28px 24px 28px;
+      overflow-y: scroll;
       overflow-x: hidden;
       display: flex;
       flex-direction: column;
       gap: 20px;
+      scroll-behavior: smooth;
+      -webkit-overflow-scrolling: touch;
     }
 
     .chat-messages::-webkit-scrollbar {
@@ -383,23 +391,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     .chat-messages::-webkit-scrollbar-track {
-      background: transparent;
+      background: rgba(15, 23, 42, 0.3);
     }
 
     .chat-messages::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.15);
+      background: rgba(255, 255, 255, 0.2);
       border-radius: 9999px;
     }
 
     .chat-messages::-webkit-scrollbar-thumb:hover {
-      background: rgba(99, 102, 241, 0.5);
+      background: rgba(99, 102, 241, 0.6);
     }
 
-    /* WhatsApp Style Floating Scroll to Bottom Button */
-    .btn-scroll-bottom {
+    /* Floating Scroll Controls (Scroll Up & Scroll Down) */
+    .scroll-controls {
       position: absolute;
       bottom: 96px;
-      right: 32px;
+      right: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 25;
+    }
+
+    .btn-scroll {
       width: 38px;
       height: 38px;
       border-radius: 50%;
@@ -412,15 +427,43 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 16px;
       cursor: pointer;
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-      z-index: 20;
       transition: all 0.2s ease;
+      user-select: none;
     }
 
-    .btn-scroll-bottom:hover {
+    .btn-scroll:hover {
       background: var(--primary);
       color: #fff;
       transform: translateY(-2px);
       box-shadow: 0 6px 20px var(--primary-glow);
+    }
+
+    /* Suggestion Chips */
+    .chips-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .chip-btn {
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      color: #c7d2fe;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+
+    .chip-btn:hover {
+      background: var(--primary);
+      color: #fff;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px var(--primary-glow);
     }
 
     .message-row {
@@ -876,10 +919,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div id="chat-bottom-anchor" style="height: 1px; width: 100%; flex-shrink: 0; margin-top: 4px;"></div>
       </div>
 
-      <!-- WhatsApp Style Floating Scroll to Bottom Button -->
-      <button class="btn-scroll-bottom" id="btn-scroll-bottom" onclick="scrollToBottom(true)" title="Scroll to latest message">
-        ↓
-      </button>
+      <!-- Floating Scroll Navigation Controls (Scroll Up & Scroll Down) -->
+      <div class="scroll-controls" id="scroll-controls">
+        <button class="btn-scroll" id="btn-scroll-top" onclick="scrollToTop(true)" title="Scroll up to top">
+          ↑
+        </button>
+        <button class="btn-scroll" id="btn-scroll-bottom" onclick="scrollToBottom(true)" title="Scroll down to latest">
+          ↓
+        </button>
+      </div>
 
       <!-- Typing Indicator Wave -->
       <div class="typing-indicator" id="typing-indicator">
@@ -1001,6 +1049,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       contentWrap.appendChild(senderName);
       contentWrap.appendChild(bubble);
 
+      // Render suggestion chips if available
+      if (metadata && metadata.chips && metadata.chips.length > 0 && sender === 'bot') {
+        const chipsRow = document.createElement('div');
+        chipsRow.className = 'chips-row';
+        metadata.chips.forEach(chipText => {
+          const chip = document.createElement('button');
+          chip.className = 'chip-btn';
+          chip.innerText = chipText;
+          chip.onclick = () => {
+            const input = document.getElementById('chat-input');
+            input.value = chipText;
+            handleSendMessage();
+          };
+          chipsRow.appendChild(chip);
+        });
+        contentWrap.appendChild(chipsRow);
+      }
+
       // If metadata contains a synthesized design plan, render the Itemized BOQ Card
       if (metadata && metadata.plan) {
         const plan = metadata.plan;
@@ -1109,50 +1175,66 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         container.appendChild(row);
       }
 
-      // WhatsApp auto-scroll with smooth animation
+      // Smooth auto-scroll down to show the new message
       scrollToBottom(true);
     }
 
     function scrollToBottom(smooth = true) {
       const container = document.getElementById('chat-messages');
-      const anchor = document.getElementById('chat-bottom-anchor');
       if (!container) return;
 
-      // 1. Force container scroll offset
-      container.scrollTop = container.scrollHeight + 10000;
-
-      // 2. Scroll anchor element into view (native WhatsApp behavior)
-      if (anchor) {
-        anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
-      }
-
-      // 3. Animation frame catch-up
-      requestAnimationFrame(() => {
-        container.scrollTop = container.scrollHeight + 10000;
-        if (anchor) anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+      container.scrollTo({
+        top: container.scrollHeight + 10000,
+        behavior: smooth ? 'smooth' : 'auto'
       });
 
-      // 4. Timeouts for async layout reflow (cards, fonts, tables)
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight + 10000;
+        handleChatScroll();
+      });
+
       setTimeout(() => {
         container.scrollTop = container.scrollHeight + 10000;
-        if (anchor) anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+        handleChatScroll();
       }, 50);
 
       setTimeout(() => {
         container.scrollTop = container.scrollHeight + 10000;
-        if (anchor) anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+        handleChatScroll();
+      }, 200);
+    }
+
+    function scrollToTop(smooth = true) {
+      const container = document.getElementById('chat-messages');
+      if (!container) return;
+
+      container.scrollTo({
+        top: 0,
+        behavior: smooth ? 'smooth' : 'auto'
+      });
+
+      setTimeout(() => {
+        handleChatScroll();
       }, 200);
     }
 
     function handleChatScroll() {
       const container = document.getElementById('chat-messages');
-      const btn = document.getElementById('btn-scroll-bottom');
-      if (!container || !btn) return;
+      const btnBottom = document.getElementById('btn-scroll-bottom');
+      const btnTop = document.getElementById('btn-scroll-top');
+      if (!container) return;
+
       const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-      if (distanceFromBottom > 150) {
-        btn.style.display = 'flex';
-      } else {
-        btn.style.display = 'none';
+      const distanceFromTop = container.scrollTop;
+
+      // Show scroll to bottom button if user scrolled up more than 60px
+      if (btnBottom) {
+        btnBottom.style.display = distanceFromBottom > 60 ? 'flex' : 'none';
+      }
+
+      // Show scroll to top button if user scrolled down more than 150px
+      if (btnTop) {
+        btnTop.style.display = distanceFromTop > 150 ? 'flex' : 'none';
       }
     }
 
