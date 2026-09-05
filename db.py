@@ -60,6 +60,14 @@ def init_chat_tables(db_path: Optional[str] = None) -> None:
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS session_scorecards (
+        session_id TEXT PRIMARY KEY,
+        scorecard_json TEXT,
+        created_at TEXT
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -162,3 +170,39 @@ def get_chat_history(session_id: str, limit: int = 50, db_path: Optional[str] = 
             item["metadata"] = {}
         history.append(item)
     return history
+
+
+def save_session_scorecard(session_id: str, scorecard: Dict[str, Any], db_path: Optional[str] = None) -> None:
+    """Save an evaluated 14-column scorecard row for a completed chat session."""
+    init_chat_tables(db_path)
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+    now_iso = datetime.now().isoformat()
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO session_scorecards (session_id, scorecard_json, created_at)
+    VALUES (?, ?, ?)
+    """, (session_id, json.dumps(scorecard), now_iso))
+
+    conn.commit()
+    conn.close()
+
+
+def get_all_session_scorecards(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve all saved session scorecards in reverse chronological order."""
+    init_chat_tables(db_path)
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT scorecard_json FROM session_scorecards ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+
+    scorecards = []
+    for r in rows:
+        try:
+            scorecards.append(json.loads(r[0]))
+        except Exception:
+            pass
+    return scorecards
+

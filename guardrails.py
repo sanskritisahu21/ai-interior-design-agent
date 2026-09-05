@@ -96,8 +96,8 @@ def check_spatial_overcrowding_preliminary(
     room_area_sqm = (length_cm * width_cm) / 10000.0
     text = (must_haves + " " + notes).lower()
 
-    # Case 1: Extreme micro-room (e.g. 200x200 = 4.0 sqm) requesting 3-seater sofa + tables
-    if room_area_sqm <= 5.0 and ("3-seater" in text or "sofa" in text and "tv" in text):
+    # Case 1: Extreme micro-room (<= 4.0 sqm) specifically demanding a full 3-seater sofa (TC-20 / SYN-06)
+    if room_area_sqm <= 4.0 and ("3-seater" in text or "3 seater" in text or "three seater" in text):
         return (
             "SPATIAL_OVERCROWDING_REFUSAL",
             f"Room area ({room_area_sqm:.2f} sqm) is too small to physically accommodate a 3-seater sofa and living set. Minimum safe circulation corridors (75cm) would be completely blocked."

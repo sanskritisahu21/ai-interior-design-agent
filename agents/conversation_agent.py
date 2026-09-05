@@ -53,7 +53,104 @@ class ConversationAgent:
                 "message": first_greeting,
                 "metadata": {"stage": "GREETING"}
             }
-        return history[0]
+    def _auto_score_session(self, session_id: str) -> None:
+        """Automatically evaluates and saves the 14-column scorecard for a completed or revised session."""
+        try:
+            import eval_scorecard
+            eval_scorecard.record_chat_session_scorecard(session_id)
+        except Exception:
+            pass
+
+    def _check_negative_guardrails(self, text: str) -> Optional[Tuple[str, str]]:
+        """
+        Pre-flight negative guardrail audit across:
+        1. Commentary on personality, community, politics, cinema, country
+        2. Role hijacking / coding / external task refusal
+        3. Core code, API keys, RAG architecture, system prompt leaking
+        4. Inquiries beyond interior design planning
+        """
+        lower = text.lower()
+
+        # Guardrail 6: Do not comment on any personality, community, politics, cinema, country
+        political_entities = [
+            "modi", "rahul gandhi", "bjp", "congress", "aap", "trump", "biden",
+            "election", "politics", "political", "prime minister", "president",
+            "democracy", "dictator", "communism", "capitalism", "socialism"
+        ]
+        community_religion = [
+            "hindu", "muslim", "christian", "sikh", "islam", "judaism", "caste",
+            "brahmin", "dalit", "race", "ethnicity", "religion"
+        ]
+        cinema_celebrities = [
+            "bollywood", "hollywood", "cinema", "movie review", "shah rukh",
+            "salman khan", "amitabh", "deepika", "tom cruise", "actor", "actress",
+            "box office", "film industry"
+        ]
+        country_geopolitics = [
+            "pakistan", "china war", "russia ukraine", "geopolitics", "foreign policy",
+            "which country is better", "hate country", "invade", "israel", "palestine"
+        ]
+        
+        commentary_triggers = [
+            "what do you think of", "who is better", "your opinion on", "do you support",
+            "comment on", "tell me about", "who should i vote", "is good or bad", "favorite actor",
+            "favorite movie", "favorite country"
+        ]
+        
+        has_commentary_intent = any(ct in lower for ct in commentary_triggers)
+        has_forbidden_entity = any(p in lower for p in political_entities + community_religion + cinema_celebrities + country_geopolitics)
+
+        if (has_commentary_intent and has_forbidden_entity) or \
+           any(p in lower for p in ["who will win election", "modi vs", "trump vs", "hindu vs muslim", "which country is best"]):
+            return (
+                "NEUTRALITY_BREACH",
+                "As an autonomous interior design consultant for Interior Company × Blocks, I maintain strict neutrality and do not comment on personalities, communities, politics, cinema, or countries. Let's refocus on planning and designing your space!"
+            )
+
+        # Guardrail 7: Do not work on any role assigned apart from given assigned role / coding
+        role_hijack_patterns = [
+            r"\b(write|generate|debug|fix|create)\s+(a\s+)?(python|javascript|java|c\+\+|html|css|sql|rust|php|ruby|bash|code|script|algorithm|regex)\b",
+            r"\b(solve|calculate)\s+(calculus|math problem|equation|algebra|differential)\b",
+            r"\b(act as|pretend to be|roleplay as|you are now)\s+(a software engineer|a doctor|a lawyer|a therapist|a linux terminal|dan|jailbreak)\b",
+            r"\b(do my homework|write an essay on|write poetry about|compose a song)\b"
+        ]
+        for pat in role_hijack_patterns:
+            if re.search(pat, lower):
+                return (
+                    "ROLE_HIJACK_REFUSAL",
+                    "I cannot take on external roles or coding tasks. My dedicated and exclusive role is Siya, an autonomous interior design consultant for Interior Company × Blocks. How can I assist with your room layout, furniture, or decor?"
+                )
+
+        # Guardrail 8: Do not share your core code, API documentation, API keys, RAG, Prompt etc.
+        leak_patterns = [
+            r"\b(system prompt|initial prompt|hidden prompt|developer prompt|prompt template)\b",
+            r"\b(show|reveal|display|print|share|dump|leak|give)\s+(your\s+)?(code|source code|api key|apikey|secret|rag|instructions|database schema|system prompt)\b",
+            r"\b(api documentation|postman collection|backend endpoint list|api credentials)\b",
+            r"\b(ignore previous instructions and (show|print|tell))\b"
+        ]
+        for pat in leak_patterns:
+            if re.search(pat, lower):
+                return (
+                    "CONFIDENTIALITY_BREACH",
+                    "I cannot disclose core code, API keys, system prompts, RAG architecture, or internal technical documentation. These are confidential operational assets of Interior Company × Blocks. Let's return to your interior design plan."
+                )
+
+        # Guardrail 9: Do not go beyond the field interior design planning
+        out_of_domain_patterns = [
+            r"\b(medical diagnosis|symptom checker|prescribe medicine|what disease do i have|cure headache)\b",
+            r"\b(legal advice|sue my landlord|draft a contract|court case|file a lawsuit)\b",
+            r"\b(stock recommendation|crypto trading|forex trading|invest in bitcoin|buy stocks)\b",
+            r"\b(how to fix my car engine|car transmission repair|replace brake pads)\b",
+            r"\b(cook biryani recipe|baking cake recipe|travel itinerary for paris)\b"
+        ]
+        for pat in out_of_domain_patterns:
+            if re.search(pat, lower):
+                return (
+                    "OUT_OF_DOMAIN_REFUSAL",
+                    "I am exclusively specialized in interior design planning and furniture layouts. I cannot provide advice outside this domain. Please let me know what room or interior space you would like to design!"
+                )
+
+        return None
 
     def process_message(self, session_id: str, user_text: str) -> Dict[str, Any]:
         """
@@ -69,6 +166,22 @@ class ConversationAgent:
 
         cleaned_text = user_text.strip()
         lower_text = cleaned_text.lower()
+
+        # Operational Guardrails Pre-flight Audit
+        guardrail_trip = self._check_negative_guardrails(cleaned_text)
+        if guardrail_trip:
+            status_code, refusal_msg = guardrail_trip
+            db.add_chat_message(session_id, sender="siya", message=refusal_msg, db_path=self.db_path)
+            return {
+                "session_id": session_id,
+                "sender": "siya",
+                "message": refusal_msg,
+                "metadata": {
+                    "stage": stage,
+                    "guardrail_triggered": status_code,
+                    "chips": ["Living Room", "Bedroom", "Dining", "Study"] if stage in ["GREETING", "ROOM_TYPE"] else []
+                }
+            }
 
         response_text = ""
         metadata: Dict[str, Any] = {
@@ -306,26 +419,39 @@ class ConversationAgent:
             # Generate the design plan using the specialist agents!
             plan_result = self._synthesize_plan(session_id)
             db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(plan_result))
+            self._auto_score_session(session_id)
 
-            fin = plan_result.get("financial_summary", {})
-            spat = plan_result.get("spatial_fit_summary", {})
+            recs = plan_result.get("recommendations", {})
+            boq = plan_result.get("boq", [])
 
-            # Budget diagnosis
-            budget_diag = ""
-            if plan_result.get("status") == "BUDGET_DEFICIT_FLAGGED" or fin.get("remaining_budget_inr", 0) < 0:
-                budget_diag = (
-                    f"⚠️ Budget Notice: The complete set comes to ₹{fin.get('total_spent_inr', 0):,}. "
-                    "We have prioritized core foundation pieces and suggested budget-friendly options to keep you on track.\n\n"
+            # Check coverage of requested must-haves vs catalog & plan
+            coverage = self.catalog_agent.check_must_haves_coverage(user_text, boq, room_type=room_t)
+
+            if coverage["has_unavailable"]:
+                unavail_str = ", ".join(coverage["unavailable_items"])
+                avail_str = ", ".join(coverage["available_items"])
+                intro_text = (
+                    f"We don't have {unavail_str} in our catalog for {room_t}.\n"
+                    f"Here is your customized interior design plan with the available items: {avail_str}."
                 )
+            else:
+                intro_text = f"🎉 Here is your customized interior design plan for your {room_t}!"
+
+            # Brand substitutions note if applicable
+            for orig_brand, sub_brand in coverage.get("brand_substitutions", []):
+                intro_text += f"\n(Note: Substituted external {orig_brand} with verified in-catalog {sub_brand})"
+
+            rec_item = recs.get("item_recommendation", "")
+            rec_style = recs.get("style_recommendation", "")
+            rec_color = recs.get("color_recommendation", "")
 
             response_text = (
-                f"{unlisted_alert}"
-                f"🎉 I have put together a customized design plan for your {room_t}!\n\n"
-                f"{budget_diag}"
-                f"• Theme: {plan_result.get('design_concept', {}).get('theme')}\n"
-                f"• Total Spent: ₹{fin.get('total_spent_inr', 0):,} ({fin.get('budget_utilization_percentage')} % utilization)\n"
-                f"• Floor Occupancy: {spat.get('occupancy_percentage')} (Circulation safe: {spat.get('circulation_viable')})\n\n"
-                "Review the itemized Bill of Quantities (BOQ) below. Would you like to swap any items or adjust the budget?"
+                f"{intro_text}\n\n"
+                f"💡 Recommendations:\n"
+                f"• Items: {rec_item}\n"
+                f"• Style: {rec_style}\n"
+                f"• Color & Finish: {rec_color}\n\n"
+                "Review the complete 9-field itemized Bill of Quantities (BOQ) below. Would you like to swap any items, change styles, or adjust the budget?"
             )
             metadata["plan"] = plan_result
             metadata["chips"] = ["Looks great!", "Can we reduce budget?", "Swap sofa", "Start over"]
@@ -335,25 +461,34 @@ class ConversationAgent:
         # STAGE 7: PLAN REVISION / EDIT PLAN
         # -------------------------------------------------------------
         elif stage in ["PLAN_GENERATED", "PLAN_REVISION"]:
-            if "reduce" in lower_text or "cheaper" in lower_text or "budget" in lower_text:
-                # User wants to adjust budget
-                b_res = self.budget_agent.parse_budget_input(user_text)
-                if not b_res["is_skipped"] and b_res.get("budget_target"):
-                    db.update_session(session_id, db_path=self.db_path, budget_max=b_res["budget_target"])
+            room_t = session.get("room_type") or "Living Room"
+            length_cm = int(session.get("length_cm") or 450)
+            width_cm = int(session.get("width_cm") or 350)
+            budget_val = int(session.get("budget_max") or 200000)
+            pref_style = session.get("style") or "Scandinavian"
 
-                # Re-synthesize with tighter budget
-                revised_plan = self._synthesize_plan(session_id, force_cheaper=True)
-                db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(revised_plan))
-                fin = revised_plan.get("financial_summary", {})
+            # Load current plan
+            raw_plan = session.get("current_plan_json")
+            if raw_plan:
+                try:
+                    plan = json.loads(raw_plan)
+                except Exception:
+                    plan = self._synthesize_plan(session_id)
+            else:
+                plan = self._synthesize_plan(session_id)
 
-                response_text = (
-                    f"I've revised the plan to be more budget-friendly! "
-                    f"The new total is ₹{fin.get('total_spent_inr', 0):,} (Remaining: ₹{fin.get('remaining_budget_inr', 0):,}). "
-                    "I have updated the BOQ table below."
-                )
-                metadata["plan"] = revised_plan
-                metadata["chips"] = ["Confirm plan", "Looks perfect!", "Start fresh"]
-            elif "start over" in lower_text or "restart" in lower_text or "start fresh" in lower_text:
+            # Intent target extractions
+            rem_target = self._extract_remove_target(lower_text)
+            add_target = self._extract_add_target(lower_text)
+
+            # If user directly typed an item name or category (e.g. "armchair", "arm chair", "bookshelf")
+            if not add_target and not rem_target and len(cleaned_text.split()) <= 4:
+                probe = self.catalog_agent.find_catalog_item_for_room(lower_text, room_type=room_t, style=pref_style)
+                if probe:
+                    add_target = lower_text
+
+            # 1. Reset / restart conversation
+            if "start over" in lower_text or "restart" in lower_text or "start fresh" in lower_text:
                 db.update_session(
                     session_id,
                     db_path=self.db_path,
@@ -371,12 +506,236 @@ class ConversationAgent:
                 response_text = "Hi, I am Siya, your interior design consultant! What room type are we designing today?"
                 metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study"]
                 metadata["stage"] = "ROOM_TYPE"
+
+            # 2. Confirmation
+            elif any(p in lower_text for p in ["looks great", "looks perfect", "looks good", "confirm plan", "proceed", "finalize", "i like it"]):
+                self._auto_score_session(session_id)
+                response_text = (
+                    "🎉 Fantastic! Your customized BOQ interior plan is confirmed and ready. "
+                    "If you ever want to make changes (like adding, removing, or swapping items), just send me a message anytime!"
+                )
+                metadata["plan"] = plan
+                metadata["chips"] = ["Add an item", "Remove an item", "Make it cheaper", "Start fresh"]
+
+            # 3. Compound remove & add in one instruction (e.g. "remove coffee table and add armchair")
+            elif re.search(r"\b(?:remove|delete|drop)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+?)\s+(?:and|&)\s+(?:also\s+)?(?:add|include)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)", lower_text):
+                compound_m = re.search(r"\b(?:remove|delete|drop)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+?)\s+(?:and|&)\s+(?:also\s+)?(?:add|include)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)", lower_text)
+                rem_target = compound_m.group(1).strip()
+                add_target = compound_m.group(2).strip()
+
+                rem_item, new_boq = self._find_and_remove_boq_item(plan.get("boq", []), rem_target)
+                if rem_item:
+                    plan["boq"] = new_boq
+
+                added_item = self.catalog_agent.find_catalog_item_for_room(add_target, room_type=room_t, style=pref_style)
+                if added_item:
+                    plan["boq"].append(self._create_boq_row(added_item, preferred_style=pref_style))
+
+                plan = self._recalculate_plan_metrics(plan, length_cm, width_cm, budget_val, pref_style, room_type=room_t)
+                db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(plan))
+                self._auto_score_session(session_id)
+
+                fin = plan["financial_summary"]
+                rem_b = fin["remaining_budget_inr"]
+                b_status = f"₹{fin['total_spent_inr']:,} (₹{rem_b:,} remaining within budget)" if rem_b >= 0 else f"₹{fin['total_spent_inr']:,} (exceeds budget by ₹{abs(rem_b):,})"
+                recs = plan["recommendations"]
+
+                status_lines = []
+                if rem_item:
+                    status_lines.append(f"• Removed: {rem_item['name']} ({rem_item['category']})")
+                if added_item:
+                    status_lines.append(f"• Added: {added_item['name']} ({added_item['category']})")
+                elif not added_item:
+                    status_lines.append(f"• Could not add '{add_target}' (not available in {room_t} catalog)")
+
+                response_text = (
+                    f"Updated your design plan:\n" + "\n".join(status_lines) + f"\n\nYour updated total spend is {b_status}.\n\n"
+                    f"💡 Recommendations:\n"
+                    f"• Items: {recs.get('item_recommendation', '')}\n"
+                    f"• Style: {recs.get('style_recommendation', '')}\n"
+                    f"• Color & Finish: {recs.get('color_recommendation', '')}\n\n"
+                    "The updated 9-field BOQ table has been rendered below."
+                )
+                metadata["plan"] = plan
+                metadata["chips"] = ["Looks great!", "Add an item", "Remove an item", "Make it cheaper", "Start fresh"]
+
+            # 4. SWAP / REPLACE (e.g. "swap sofa for leather sofa", "replace coffee table with side table")
+            elif re.search(r"\b(?:swap|replace|change)\s+(?:the\s+)?([a-z0-9\s\-]+?)\s+(?:for|with|to)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)", lower_text):
+                swap_m = re.search(r"\b(?:swap|replace|change)\s+(?:the\s+)?([a-z0-9\s\-]+?)\s+(?:for|with|to)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)", lower_text)
+                old_target = swap_m.group(1).strip()
+                new_target = swap_m.group(2).strip()
+
+                new_cat_item = self.catalog_agent.find_catalog_item_for_room(new_target, room_type=room_t, style=pref_style)
+                if not new_cat_item:
+                    room_categories = self.catalog_agent.get_categories_for_room(room_t)
+                    response_text = (
+                        f"We don't have '{new_target}' in our catalog for {room_t}. "
+                        f"Available categories for {room_t} include: {', '.join(room_categories[:6])}."
+                    )
+                    metadata["plan"] = plan
+                    metadata["chips"] = [f"Add {c}" for c in room_categories[:3]] + ["Looks great!"]
+                else:
+                    rem_item, new_boq = self._find_and_remove_boq_item(plan.get("boq", []), old_target)
+                    plan["boq"] = new_boq
+                    plan["boq"].append(self._create_boq_row(new_cat_item, preferred_style=pref_style))
+                    plan = self._recalculate_plan_metrics(plan, length_cm, width_cm, budget_val, pref_style, room_type=room_t)
+                    db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(plan))
+                    self._auto_score_session(session_id)
+
+                    fin = plan["financial_summary"]
+                    rem_b = fin["remaining_budget_inr"]
+                    b_status = f"₹{fin['total_spent_inr']:,} (₹{rem_b:,} remaining within budget)" if rem_b >= 0 else f"₹{fin['total_spent_inr']:,} (exceeds budget by ₹{abs(rem_b):,})"
+                    recs = plan["recommendations"]
+
+                    rem_msg = f"Replaced {rem_item['name']}" if rem_item else f"Replaced {old_target}"
+                    response_text = (
+                        f"🔄 {rem_msg} with {new_cat_item['name']} ({new_cat_item['category']})!\n"
+                        f"Your updated total spend is {b_status}.\n\n"
+                        f"💡 Recommendations:\n"
+                        f"• Items: {recs.get('item_recommendation', '')}\n"
+                        f"• Style: {recs.get('style_recommendation', '')}\n"
+                        f"• Color & Finish: {recs.get('color_recommendation', '')}\n\n"
+                        "The updated 9-field BOQ table has been rendered below."
+                    )
+                    metadata["plan"] = plan
+                    metadata["chips"] = ["Looks great!", "Add an item", "Remove an item", "Make it cheaper"]
+
+            # 5. REMOVE intent (e.g. "remove coffee table", "delete rug", "drop floor lamp", "don't want coffee table")
+            elif rem_target:
+                raw_target = rem_target
+                clean_target = re.sub(r"\b(from the room|from the plan|in the room|in the plan|please|as well|also)\b", "", raw_target, flags=re.IGNORECASE).strip().strip("?.!,")
+
+                candidates = [re.sub(r"^(?:a|an|the|some)\s+", "", c.strip(), flags=re.IGNORECASE).strip() for c in re.split(r",|\s+and\s+|\s+&\s+", clean_target) if c.strip()]
+                removed_items = []
+                missing_items = []
+
+                for cand in candidates:
+                    rem_item, new_boq = self._find_and_remove_boq_item(plan.get("boq", []), cand)
+                    if rem_item:
+                        plan["boq"] = new_boq
+                        removed_items.append(rem_item)
+                    else:
+                        missing_items.append(cand)
+
+                if not removed_items:
+                    current_items = ", ".join([it.get("name", it.get("category", "")) for it in plan.get("boq", [])])
+                    response_text = (
+                        f"'{clean_target}' was not found in your current design plan. "
+                        f"Your plan currently includes: {current_items}."
+                    )
+                    metadata["plan"] = plan
+                    metadata["chips"] = ["Looks great!", "Make it cheaper", "Start over"]
+                else:
+                    plan = self._recalculate_plan_metrics(plan, length_cm, width_cm, budget_val, pref_style, room_type=room_t)
+                    db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(plan))
+                    self._auto_score_session(session_id)
+
+                    fin = plan["financial_summary"]
+                    rem_b = fin["remaining_budget_inr"]
+                    b_status = f"₹{fin['total_spent_inr']:,} (₹{rem_b:,} remaining within budget)" if rem_b >= 0 else f"₹{fin['total_spent_inr']:,} (exceeds budget by ₹{abs(rem_b):,})"
+                    recs = plan["recommendations"]
+
+                    rem_names = ", ".join([f"{it['name']} ({it['category']})" for it in removed_items])
+                    missing_msg = f" (Note: {', '.join(missing_items)} was not in plan)" if missing_items else ""
+
+                    response_text = (
+                        f"🗑️ Removed {rem_names} from your design plan.{missing_msg}\n"
+                        f"Your updated total spend is {b_status}.\n\n"
+                        f"💡 Recommendations:\n"
+                        f"• Items: {recs.get('item_recommendation', '')}\n"
+                        f"• Style: {recs.get('style_recommendation', '')}\n"
+                        f"• Color & Finish: {recs.get('color_recommendation', '')}\n\n"
+                        "The updated 9-field itemized Bill of Quantities (BOQ) is rendered below."
+                    )
+                    metadata["plan"] = plan
+                    metadata["chips"] = ["Looks great!", "Add an item", "Make it cheaper", "Start over"]
+
+            # 6. ADD intent (e.g. "add an armchair", "add arm chair", "why are you not adding armchair?", "can we add a rug", "add floor lamp", "add jacuzzi")
+            elif add_target:
+                raw_target = add_target
+                clean_target = re.sub(r"\b(to the room|to the plan|in the room|in the plan|please|as well|also)\b", "", raw_target, flags=re.IGNORECASE).strip().strip("?.!,")
+
+                candidates = [re.sub(r"^(?:a|an|the|some)\s+", "", c.strip(), flags=re.IGNORECASE).strip() for c in re.split(r",|\s+and\s+|\s+&\s+", clean_target) if c.strip()]
+                added_items = []
+                missing_items = []
+
+                for cand in candidates:
+                    matched_item = self.catalog_agent.find_catalog_item_for_room(cand, room_type=room_t, style=pref_style)
+                    if matched_item:
+                        new_row = self._create_boq_row(matched_item, preferred_style=pref_style)
+                        plan["boq"].append(new_row)
+                        added_items.append(matched_item)
+                    else:
+                        missing_items.append(cand)
+
+                if not added_items:
+                    # Item is NOT present in catalog for that room
+                    room_categories = self.catalog_agent.get_categories_for_room(room_t)
+                    cats_preview = ", ".join(room_categories[:6])
+                    response_text = (
+                        f"We don't have '{clean_target}' in our catalog for {room_t}. "
+                        f"You can choose to add from our available categories for {room_t}: {cats_preview}, and more."
+                    )
+                    metadata["plan"] = plan
+                    metadata["chips"] = [f"Add {c}" for c in room_categories[:3]] + ["Looks great!"]
+                else:
+                    plan = self._recalculate_plan_metrics(plan, length_cm, width_cm, budget_val, pref_style, room_type=room_t)
+                    db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(plan))
+                    self._auto_score_session(session_id)
+
+                    fin = plan["financial_summary"]
+                    rem_b = fin["remaining_budget_inr"]
+                    b_status = f"₹{fin['total_spent_inr']:,} (₹{rem_b:,} remaining within budget)" if rem_b >= 0 else f"₹{fin['total_spent_inr']:,} (exceeds budget by ₹{abs(rem_b):,})"
+                    recs = plan["recommendations"]
+
+                    added_names = ", ".join([f"{it['name']} ({it['category']})" for it in added_items])
+                    missing_msg = f"\n(Note: We don't have {', '.join(missing_items)} in our catalog for {room_t})" if missing_items else ""
+
+                    response_text = (
+                        f"✅ Added {added_names} to your design plan!{missing_msg}\n"
+                        f"Your updated total spend is {b_status}.\n\n"
+                        f"💡 Recommendations:\n"
+                        f"• Items: {recs.get('item_recommendation', '')}\n"
+                        f"• Style: {recs.get('style_recommendation', '')}\n"
+                        f"• Color & Finish: {recs.get('color_recommendation', '')}\n\n"
+                        "The updated 9-field itemized Bill of Quantities (BOQ) is rendered below."
+                    )
+                    metadata["plan"] = plan
+                    metadata["chips"] = ["Looks great!", "Add another item", "Remove an item", "Make it cheaper", "Start fresh"]
+
+            # 7. Check budget reduction / cheaper
+            elif "reduce" in lower_text or "cheaper" in lower_text or "budget" in lower_text:
+                b_res = self.budget_agent.parse_budget_input(user_text)
+                if not b_res["is_skipped"] and b_res.get("budget_target"):
+                    db.update_session(session_id, db_path=self.db_path, budget_max=b_res["budget_target"])
+
+                revised_plan = self._synthesize_plan(session_id, force_cheaper=True)
+                db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(revised_plan))
+                recs = revised_plan.get("recommendations", {})
+
+                rec_item = recs.get("item_recommendation", "")
+                rec_style = recs.get("style_recommendation", "")
+                rec_color = recs.get("color_recommendation", "")
+
+                response_text = (
+                    "I've revised the plan to be more budget-friendly!\n\n"
+                    f"💡 Recommendations:\n"
+                    f"• Items: {rec_item}\n"
+                    f"• Style: {rec_style}\n"
+                    f"• Color & Finish: {rec_color}\n\n"
+                    "The updated 9-field BOQ table has been rendered below."
+                )
+                metadata["plan"] = revised_plan
+                metadata["chips"] = ["Confirm plan", "Looks perfect!", "Start fresh"]
+
+            # 8. Fallback
             else:
                 response_text = (
-                    "Your customized BOQ plan is saved! If you want to refine anything (e.g. 'swap sofa for leather', "
-                    "'make it cheaper', or 'add a floor lamp'), just let me know and I will edit the plan in real-time."
+                    "Your customized BOQ plan is saved! You can ask to add any item (e.g. 'add an armchair', 'add a bookshelf'), "
+                    "remove any item (e.g. 'remove coffee table'), swap items, or adjust your budget."
                 )
-                metadata["chips"] = ["Make it cheaper", "Change style", "Start over"]
+                metadata["plan"] = plan
+                metadata["chips"] = ["Add an armchair", "Remove coffee table", "Make it cheaper", "Start over"]
 
         # Log Siya's response to SQLite
         db.add_chat_message(
@@ -437,4 +796,460 @@ class ConversationAgent:
 
         from agent import InteriorDesignAgent
         agent = InteriorDesignAgent(db_path=self.db_path)
-        return agent.run(brief_payload)
+        res = agent.run(brief_payload)
+
+        # Fallback guard: Ensure chat users ALWAYS receive a valid, complete BOQ plan
+        if not res.get("boq"):
+            brief_payload["notes"] = "compact space-conscious layout"
+            brief_payload["must_haves"] = ""
+            fallback_res = agent.run(brief_payload)
+            if fallback_res.get("boq"):
+                return fallback_res
+        return res
+
+    def _create_boq_row(self, catalog_item: Dict[str, Any], preferred_style: str = "Scandinavian") -> Dict[str, Any]:
+        """Formats a raw catalog DB row into a standardized 9-field BOQ entry."""
+        w = catalog_item.get("width_cm")
+        d = catalog_item.get("depth_cm")
+        h = catalog_item.get("height_cm")
+        dim_str = f"{w or 0} x {d or 0} x {h or 0} cm" if (w or d or h) else "Dimensions on site measurement"
+
+        return {
+            "item_id": catalog_item["item_id"],
+            "category": catalog_item["category"],
+            "name": catalog_item["name"],
+            "style": catalog_item.get("style_tags") or preferred_style,
+            "style_tags": catalog_item.get("style_tags") or preferred_style,
+            "dimensions": dim_str,
+            "width_cm": w,
+            "depth_cm": d,
+            "height_cm": h,
+            "color_finish": catalog_item.get("color_finish") or "Natural finish",
+            "finish": catalog_item.get("color_finish") or "Natural finish",
+            "price_inr": catalog_item["price_inr"],
+            "in_stock": catalog_item.get("in_stock", 1),
+            "lead_time_days": catalog_item.get("lead_time_days", 7)
+        }
+
+    def _extract_remove_target(self, text: str) -> Optional[str]:
+        """Extracts removal target keyword from various user removal phrasings."""
+        m_why = re.search(
+            r"\b(?:why is|why is there|why did you include|why do we have)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+?)\s+(?:in|in the plan|here)",
+            text,
+            re.I
+        )
+        if m_why:
+            return re.sub(r"[?.!,;]+$", "", m_why.group(1)).strip()
+
+        m_rem = re.search(
+            r"\b(?:remove|removing|delete|deleting|drop|dropping|take out|omit|omitting|get rid of|without|no longer need|don't want|dont want|do not want|no need for|cancel)\b\s*(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
+            text,
+            re.I
+        )
+        if m_rem:
+            return re.sub(r"[?.!,;]+$", "", m_rem.group(1)).strip()
+        return None
+
+    def _extract_add_target(self, text: str) -> Optional[str]:
+        """Extracts addition target keyword from diverse user adding phrasings."""
+        # 1. Why didn't you add / why are you not adding X
+        m_why = re.search(
+            r"\b(?:why are you not adding|why aren't you adding|why arent you adding|why didn't you add|why didnt you add|why haven't you added|why havent you added|why not add|why you didn't add|why you didnt add)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)",
+            text,
+            re.I
+        )
+        if m_why:
+            return re.sub(r"[?.!,;]+$", "", m_why.group(1)).strip()
+
+        # 2. I said add X / i asked to add X / i told to add X
+        m_asked = re.search(
+            r"\b(?:i said|i asked to|i told to|i want to|i'd like to|can we|could you|please|let's|also)\s+(?:add|include|put in|insert)\s+(?:a\s+|an\s+|the\s+|some\s+)?([a-z0-9\s\-]+)",
+            text,
+            re.I
+        )
+        if m_asked:
+            return re.sub(r"[?.!,;]+$", "", m_asked.group(1)).strip()
+
+        # 3. Direct add / adding / include / put in / insert
+        m_add = re.search(
+            r"\b(?:add|adding|include|including|put in|insert)\b\s*(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
+            text,
+            re.I
+        )
+        if m_add:
+            return re.sub(r"[?.!,;]+$", "", m_add.group(1)).strip()
+
+        # 4. Want X / Need X
+        m_want = re.search(
+            r"\b(?:want|need|get)\s+(?:a\s+|an\s+|the\s+|some\s+)?([a-z0-9\s\-]+)",
+            text,
+            re.I
+        )
+        if m_want:
+            return re.sub(r"[?.!,;]+$", "", m_want.group(1)).strip()
+
+        return None
+
+    def _find_and_remove_boq_item(
+        self,
+        boq: List[Dict[str, Any]],
+        target_query: str
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Finds and removes an item from boq matching target_query by category, name, or synonym."""
+        cleaned = target_query.strip().lower()
+        synonyms = {
+            "arm chair": "armchair",
+            "armchair": "armchair",
+            "arm chairs": "armchair",
+            "armchairs": "armchair",
+            "chair": "armchair",
+            "chairs": "armchair",
+            "accent chair": "armchair",
+            "accent chairs": "armchair",
+            "lounge chair": "armchair",
+            "lounge chairs": "armchair",
+            "book shelf": "bookshelf",
+            "book shelves": "bookshelf",
+            "bookshelf": "bookshelf",
+            "bookshelves": "bookshelf",
+            "bookcase": "bookshelf",
+            "book case": "bookshelf",
+            "center table": "coffee table",
+            "tea table": "coffee table",
+            "coffee table": "coffee table",
+            "coffeetable": "coffee table",
+            "floor lamp": "floor lamp",
+            "floorlamp": "floor lamp",
+            "standing lamp": "floor lamp",
+            "reading lamp": "table lamp",
+            "table lamp": "table lamp",
+            "lamp": "floor lamp",
+            "lamps": "floor lamp",
+            "light": "floor lamp",
+            "lights": "floor lamp",
+            "lighting": "floor lamp",
+            "side table": "side table",
+            "sidetable": "side table",
+            "end table": "side table",
+            "bean bag": "bean bag",
+            "beanbag": "bean bag",
+            "plant": "planter",
+            "plants": "planter",
+            "planter": "planter",
+            "planters": "planter",
+            "pots": "planter",
+            "pot": "planter",
+            "curtain": "curtains",
+            "curtains": "curtains",
+            "drapes": "curtains",
+            "carpet": "rug",
+            "carpets": "rug",
+            "rug": "rug",
+            "rugs": "rug",
+            "couch": "sofa",
+            "couches": "sofa",
+            "sofa": "sofa",
+            "sofas": "sofa",
+            "closet": "wardrobe",
+            "almirah": "wardrobe",
+            "cupboard": "wardrobe",
+            "wardrobe": "wardrobe",
+            "painting": "wall art",
+            "art": "wall art",
+            "artwork": "wall art",
+            "wall art": "wall art",
+            "wallart": "wall art",
+            "cushion": "cushions",
+            "cushions": "cushions",
+            "pillow": "cushions",
+            "pillows": "cushions",
+            "pouf": "ottoman",
+            "pouffe": "ottoman",
+            "ottoman": "ottoman",
+            "tv": "tv unit",
+            "television": "tv unit",
+            "tv stand": "tv unit",
+            "tv unit": "tv unit",
+            "tv console": "tv unit",
+            "media console": "tv unit"
+        }
+        mapped = synonyms.get(cleaned, cleaned)
+        removed_item = None
+        new_boq = []
+        found = False
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+        norm_mapped = norm(mapped)
+        norm_clean = norm(cleaned)
+        norm_sing = re.sub(r"(ies|es|s)$", "", norm_mapped)
+
+        for item in boq:
+            if found:
+                new_boq.append(item)
+                continue
+            cat = item.get("category") or ""
+            name = item.get("name") or ""
+            norm_cat = norm(cat)
+            norm_name = norm(name)
+            norm_cat_sing = re.sub(r"(ies|es|s)$", "", norm_cat)
+
+            if (
+                norm_mapped == norm_cat
+                or norm_sing == norm_cat_sing
+                or norm_clean == norm_cat
+                or norm_mapped in norm_cat
+                or (len(norm_cat) >= 4 and norm_cat in norm_mapped)
+                or norm_mapped in norm_name
+                or norm_clean in norm_name
+                or (len(norm_name) >= 4 and norm_name in norm_mapped)
+            ):
+                removed_item = item
+                found = True
+            else:
+                new_boq.append(item)
+
+        return removed_item, new_boq
+
+    def _recalculate_plan_metrics(
+        self,
+        plan: Dict[str, Any],
+        length_cm: int,
+        width_cm: int,
+        budget_inr: int,
+        style: str,
+        room_type: str = "Living Room"
+    ) -> Dict[str, Any]:
+        """Recalculates financial summary, spatial fit, and one-liner recommendations for updated boq."""
+        boq = plan.get("boq", [])
+        selected_item_ids = [it["item_id"] for it in boq if it.get("item_id")]
+
+        # Budget calculation
+        calc_res = tools.budget_calculator(selected_item_ids, budget_inr, db_path=self.db_path)
+        total_spent = calc_res["total_spent"]
+        rem_budget = calc_res["remaining_budget"]
+        utilization = round((total_spent / budget_inr * 100), 1) if budget_inr > 0 else 0.0
+
+        # Layout fit calculation
+        fit_res = tools.layout_fit_check(length_cm, width_cm, selected_item_ids, db_path=self.db_path)
+        max_lead_days = max([x.get("lead_time_days", 7) for x in boq] or [7])
+        rem_area_sqm = round(max(0.0, fit_res["room_area_sqm"] - fit_res["furniture_footprint_sqm"]), 2)
+        rem_area_pct = round(max(0.0, (1.0 - fit_res.get("occupancy_ratio", 0.0)) * 100.0), 1)
+
+        # Dynamic intelligent budget & styling recommendations in one-liner bullet points
+        recs = {
+            "budget_status": "UNDER" if rem_budget >= 0 else "EXCEEDED",
+            "budget_difference_inr": abs(rem_budget),
+            "max_lead_time_days": max_lead_days,
+            "remaining_area_sqm": rem_area_sqm,
+            "remaining_area_percentage": rem_area_pct
+        }
+
+        if rem_budget < 0:
+            overage = abs(rem_budget)
+            sorted_by_price = sorted(boq, key=lambda x: x.get("price_inr") or 0, reverse=True)
+            top_item = sorted_by_price[0] if sorted_by_price else None
+            top_name = top_item["name"] if top_item else "main seating"
+            top_cat = top_item["category"] if top_item else "furniture"
+
+            recs["item_recommendation"] = f"Remove or swap {top_cat} '{top_name}' to save ₹{min(overage, 25000):,} and balance your budget."
+            recs["style_recommendation"] = f"Choose streamlined Minimalist profiles over handcrafted {style} pieces to reduce fabrication costs."
+            recs["color_recommendation"] = "Opt for neutral woven fabrics with matte powder-coated finishes instead of expensive leather or brass."
+            recs["summary_text"] = f"⚠️ Budget Exceeded by ₹{overage:,}! Remove or swap items to bring total spend under ₹{budget_inr:,}."
+        else:
+            surplus = rem_budget
+            recs["item_recommendation"] = f"Add an accent armchair or hand-tufted wool rug using your remaining ₹{surplus:,} budget."
+            recs["style_recommendation"] = f"Elevate the {style} theme by pairing warm walnut and oak finishes with ambient lighting."
+            recs["color_recommendation"] = "Layer earthy terracotta, olive green, or soft indigo cushions over neutral upholstery."
+            recs["summary_text"] = f"✅ Budget Under by ₹{surplus:,}! You have surplus budget to add accent seating or designer lighting."
+
+        plan["boq"] = boq
+        plan["financial_summary"] = {
+            "budget_allocated_inr": budget_inr,
+            "total_spent_inr": total_spent,
+            "remaining_budget_inr": rem_budget,
+            "budget_utilization_percentage": utilization,
+            "max_lead_time_days": max_lead_days
+        }
+        plan["spatial_fit_summary"] = {
+            "room_area_sqm": fit_res["room_area_sqm"],
+            "furniture_footprint_sqm": fit_res["furniture_footprint_sqm"],
+            "remaining_area_sqm": rem_area_sqm,
+            "remaining_area_percentage": rem_area_pct,
+            "occupancy_percentage": fit_res["occupancy_percentage"],
+            "circulation_viable": fit_res["fits_circulation"]
+        }
+        plan["recommendations"] = recs
+        return plan
+
+    def _check_negative_guardrails(self, text: str) -> Optional[Tuple[str, str]]:
+        """
+        Negative Operational Guardrails Pre-flight Audit (Section 8).
+        Strictly enforces operational boundaries and zero-tolerance gates:
+        1. Confidentiality: No leaking system prompt, internal code, API keys, RAG, internal schema.
+        2. Persona / Role Locking: Role-locked as interior designer Siya; no coding tasks, math solving, or persona hijacking.
+        3. Civil / Structural Scope Refusal: Immediate refusal of load-bearing demolition, electrical rewiring, plumbing stacks.
+        4. Neutrality: No commentary on personalities, communities, politics, cinema, countries.
+        5. Domain Exclusivity: Strictly confined to interior design planning (refuses medical, legal, financial, cooking, etc.).
+        """
+        if not text:
+            return None
+
+        clean_lower = text.lower().strip()
+
+        # -------------------------------------------------------------
+        # 1. IP & Confidentiality Gate (Guardrail 8 / Rule 3)
+        # -------------------------------------------------------------
+        # Checks for attempts to dump system prompt, source code, API keys, RAG architecture, internal credentials
+        prompt_leak_patterns = [
+            r"\b(system\s+prompt|developer\s+prompt|initial\s+prompt|hidden\s+prompt|base\s+prompt)\b",
+            r"\b(show|reveal|print|tell|display|give|share|dump|leak)\s+(me\s+)?(your\s+)?(prompt|system\s+instructions|instructions\s+above|rules|developer\s+instructions)\b",
+            r"\b(repeat|output)\s+(the\s+)?(above|previous)\s+(text|prompt|instructions)\b",
+            r"\b(ignore\s+all\s+previous\s+instructions)\b",
+            r"\b(api\s*key|secret\s*key|auth\s*token|credentials|openai_api_key|gemini_api_key|private\s*key)\b",
+            r"\b(core\s+code|source\s+code|backend\s+code|python\s+code\s+of|github\s+repo|codebase)\b",
+            r"\b(rag\s+architecture|rag\s+pipeline|embedding\s+model|vector\s+database|vector\s+store|sqlite\s+schema|db\s+schema|internal\s+tools?\s+code)\b",
+            r"\b(api\s+documentation|swagger|openapi\s+spec|postman\s+collection)\b"
+        ]
+        for pattern in prompt_leak_patterns:
+            if re.search(pattern, clean_lower):
+                refusal_msg = (
+                    "🔒 Guardrail Alert: I cannot disclose internal core code, proprietary system prompts, "
+                    "API documentation, API keys, RAG architecture, or database schemas. All internal configurations "
+                    "and operational instructions are strictly confidential. I am delighted to assist you with your interior design planning!"
+                )
+                return ("CONFIDENTIALITY_BREACH", refusal_msg)
+
+        # -------------------------------------------------------------
+        # 2. Persona Locking & Roleplay / Coding Refusal (Guardrail 7 / Rule 2)
+        # -------------------------------------------------------------
+        # Checks for coding tasks, writing software, debugging, non-design roleplay, persona hijacking
+        coding_patterns = [
+            r"\b(write|create|generate|debug|fix)\s+(a\s+)?(python|javascript|java|c\+\+|html|css|sql|rust|go|php|typescript|bash|shell|powershell)\s+(script|code|function|program|app|query)\b",
+            r"\b(write|give\s+me)\s+(some\s+)?(code|script|algorithm|regex|sql\s+query|stored\s+procedure)\b",
+            r"\b(solve\s+this\s+(coding|programming)\s+(problem|bug|issue))\b",
+            r"\b(npm\s+install|pip\s+install|git\s+clone|docker\s+run)\b",
+            r"\b(write\s+a\s+react\s+component|vue\s+component|flutter\s+widget)\b"
+        ]
+        for pattern in coding_patterns:
+            if re.search(pattern, clean_lower):
+                refusal_msg = (
+                    "🤖 Role-Lock Enforced: I am Siya, your dedicated AI Interior Design Consultant for Interior Company × Blocks. "
+                    "I am strictly role-locked to interior design planning and do not write code, debug software, or perform programming tasks. "
+                    "Please let me know your room type and dimensions so we can create your interior space plan!"
+                )
+                return ("ROLE_HIJACK_REFUSAL", refusal_msg)
+
+        roleplay_patterns = [
+            r"\b(act\s+as|pretend\s+to\s+be|you\s+are\s+now|roleplay\s+as|simulate|jailbreak|dan\s+mode)\b",
+            r"\b(forget\s+(that\s+)?you\s+are\s+(an\s+)?interior\s+design(er)?)\b",
+            r"\b(be\s+my\s+(therapist|doctor|lawyer|teacher|tutor|accountant|girlfriend|boyfriend|astrologer))\b",
+            r"\b(write\s+(an\s+)?(essay|story|poem|song|rap|fanfiction))\b",
+            r"\b(solve\s+(the\s+)?(equation|math\s+problem|calculus|algebra|integral))\b"
+        ]
+        for pattern in roleplay_patterns:
+            if re.search(pattern, clean_lower):
+                refusal_msg = (
+                    "🎭 Role-Lock Enforced: I am Siya, your dedicated AI Interior Design Consultant. "
+                    "I strictly operate within my assigned persona and cannot adopt alternate roles, roleplay, or perform tasks outside interior space planning. "
+                    "Let's focus on your home: which room would you like to design today?"
+                )
+                return ("ROLE_HIJACK_REFUSAL", refusal_msg)
+
+        # -------------------------------------------------------------
+        # 3. Civil, Structural & Electrical Safety Scope Refusal (Guardrail 3)
+        # -------------------------------------------------------------
+        civil_patterns = [
+            r"\b(knock\s+down|demolish|break|remove|tear\s+down|cut)\s+(the\s+)?(load[\s-]bearing|rcc|structural|exterior)?\s*(wall|beam|pillar|column|slab)\b",
+            r"\b(load[\s-]bearing\s+wall|rcc\s+column|structural\s+beam|structural\s+alteration)\b",
+            r"\b(core\s+drilling|chisel\s+concrete|alter\s+foundation)\b",
+            r"\b(220v|440v|breaker\s+box|electrical\s+conduit|main\s+panel|fuse\s+box|rewir(e|ing))\s*(splic|alter|mod)\b",
+            r"\b(relocate|move)\s+(main\s+)?(sewage\s+stack|gas\s+line|soil\s+pipe|plumbing\s+shaft)\b"
+        ]
+        for pattern in civil_patterns:
+            if re.search(pattern, clean_lower):
+                refusal_msg = (
+                    "⚠️ Safety Guardrail: I cannot assist with civil, structural, electrical, or plumbing alterations "
+                    "such as modifying load-bearing walls, breaking RCC pillars, or rewiring mains conduits. "
+                    "Please consult a certified civil engineer or licensed structural contractor for life-safety assessments. "
+                    "I can gladly assist with non-structural furniture layouts, finishes, and decor!"
+                )
+                return ("CIVIL_SCOPE_REFUSAL", refusal_msg)
+
+        # -------------------------------------------------------------
+        # 4. Socio-Political & Cultural Neutrality (Guardrail 6 / Rule 1)
+        # "Do not comment on any personality, community, politics, cinema, country."
+        # -------------------------------------------------------------
+        # Exclude legitimate interior design terms like "home cinema room" or "country style"
+        has_cinema_room = bool(re.search(r"\b(home\s+cinema|cinema\s+room|movie\s+room|media\s+room|theatre\s+room)\b", clean_lower))
+        has_country_style = bool(re.search(r"\b(country\s+(style|aesthetic|theme|decor|cottage|modern|french))\b", clean_lower))
+
+        neutrality_patterns = [
+            # Politics & Politicians
+            r"\b(modi|narendra\s+modi|rahul\s+gandhi|trump|donald\s+trump|biden|joe\s+biden|putin|zelensky)\b",
+            r"\b(bjp|congress\s+party|aap|aam\s+aadmi|democrat(s|ic)?|republican(s)?|parliament|lok\s+sabha|rajya\s+sabha)\b",
+            r"\b(who\s+to\s+vote|election\s+(opinion|winner|result)|political\s+(party|view|agenda|opinion)|politics)\b",
+            r"\b(communism|fascism|socialism|authoritarianism|left[\s-]wing|right[\s-]wing)\b",
+            
+            # Communities, Caste & Religious controversies
+            r"\b(hindu(ism)?|muslim(s)?|islam(ic)?|christian(ity)?|sikh(ism)?|jewish|judaism)\s+(is|are|versus|vs|better|worse|bad|good)\b",
+            r"\b(caste\s+system|brahmin|dalit|kshatriya|vaishya|reservation\s+policy|communal\s+riot|communalism)\b",
+            r"\b(which\s+(religion|community|caste)\s+is\s+(better|best|superior|worst))\b",
+            
+            # Personalities & Celebrities (outside interior design context)
+            r"\b(what\s+do\s+you\s+think\s+of|opinion\s+on)\s+([a-z]+)\b",
+            r"\b(shah\s*rukh\s*khan|salman\s*khan|aamir\s*khan|deepika|katrina|alia\s+bhatt|virat\s+kohli|rohit\s+sharma|dhoni|celebrity\s+gossip)\b",
+            r"\b(is\s+[a-z\s]+\s+(a\s+good\s+person|corrupt|evil|hero))\b",
+            
+            # Cinema & Film Critique / Gossip (excluding home cinema rooms)
+            r"\b(movie\s+review|box\s+office\s+collection|bollywood\s+(is|gossip|stars)|hollywood\s+(gossip|scandal)|film\s+industry\s+critique)\b",
+            r"\b(rate\s+the\s+movie|is\s+the\s+film\s+[a-z\s]+\s+good|best\s+actor\s+in|worst\s+actor)\b",
+            
+            # Country & Geopolitical disputes (excluding country style decor)
+            r"\b(india\s+vs\s+pakistan|israel\s+vs\s+palestine|russia\s+vs\s+ukraine|china\s+vs\s+taiwan|geopolitical\s+conflict)\b",
+            r"\b(which\s+country\s+is\s+(better|best|worst|corrupt))\b",
+            r"\b(patriotism|boycott\s+[a-z]+|hate\s+[a-z]+)\b"
+        ]
+
+        if not has_cinema_room and not has_country_style:
+            for pattern in neutrality_patterns:
+                if re.search(pattern, clean_lower):
+                    refusal_msg = (
+                        "🕊️ Neutrality Policy: As an AI Interior Design Consultant, I strictly maintain operational neutrality "
+                        "and do not comment on personalities, communities, politics, cinema, or countries. "
+                        "I am exclusively here to help you style and optimize your interior living spaces! How can I assist with your room?"
+                    )
+                    return ("NEUTRALITY_BREACH", refusal_msg)
+
+        # -------------------------------------------------------------
+        # 5. Domain Boundary & Interior Exclusivity Gate (Guardrail 9 / Rule 4)
+        # "Do not go beyond the field of interior design planning."
+        # -------------------------------------------------------------
+        out_of_domain_patterns = [
+            # Medical / Health
+            r"\b(medical\s+advice|symptom(s)?\s+of|cure\s+for|medicine\s+for|dosage\s+of|diagnose\s+me|paracetamol|antibiotics)\b",
+            r"\b(how\s+to\s+treat\s+(fever|cough|cancer|infection|diabetes|headache))\b",
+            
+            # Legal
+            r"\b(legal\s+advice|sue\s+my|file\s+a\s+lawsuit|court\s+case|legal\s+notice|draft\s+a\s+contract|tenant\s+rights\s+lawyer)\b",
+            
+            # Financial, Stocks & Crypto
+            r"\b(stock\s+tips|buy\s+or\s+sell\s+stocks|crypto\s+investment|bitcoin\s+prediction|ethereum|forex\s+trading|best\s+mutual\s+funds)\b",
+            
+            # Automotive & Heavy Engineering
+            r"\b(repair\s+my\s+car|change\s+(engine\s+)?oil|fix\s+(car|bike)\s+brakes|spark\s+plug|transmission\s+repair)\b",
+            
+            # Cooking Recipes
+            r"\b(recipe\s+for|how\s+to\s+cook|ingredients\s+to\s+bake|how\s+to\s+make\s+(biryani|pasta|curry|pizza|cake))\b"
+        ]
+        for pattern in out_of_domain_patterns:
+            if re.search(pattern, clean_lower):
+                refusal_msg = (
+                    "📐 Domain Boundary: My capabilities are strictly specialized in the field of interior design planning, "
+                    "spatial ergonomics, furniture selections, color palettes, and furnishing budgeting. "
+                    "I cannot assist with queries outside interior design. Let's design your room space together!"
+                )
+                return ("OUT_OF_DOMAIN_REFUSAL", refusal_msg)
+
+        return None

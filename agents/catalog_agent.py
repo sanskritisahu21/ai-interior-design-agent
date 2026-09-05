@@ -173,6 +173,102 @@ class CatalogAgent:
 
         return True, None, None
 
+    def check_must_haves_coverage(
+        self,
+        user_text: str,
+        boq_items: List[Dict[str, Any]],
+        room_type: str = "Living Room"
+    ) -> Dict[str, Any]:
+        """
+        Parses user's requested must-haves and checks which items are unavailable in the DB/plan.
+        Returns a dict:
+          {
+            "has_unavailable": bool,
+            "unavailable_items": List[str],
+            "available_items": List[str],
+            "brand_substitutions": List[Tuple[str, str]]
+          }
+        """
+        lower = user_text.strip().lower()
+
+        generic_tokens = ["all", "all of these", "everything", "standard", "any", "don't know", "dont know", "confused"]
+        if any(lower == g or lower.startswith(g + " ") for g in generic_tokens):
+            avail_cats = []
+            for item in boq_items:
+                c = item.get("category")
+                if c and c not in avail_cats:
+                    avail_cats.append(c)
+            return {
+                "has_unavailable": False,
+                "unavailable_items": [],
+                "available_items": avail_cats,
+                "brand_substitutions": []
+            }
+
+        brand_subs = []
+        for key, (label, sub_id, sub_name) in BRAND_SUBSTITUTIONS.items():
+            if key in lower:
+                brand_subs.append((label, sub_name))
+
+        raw_tokens = re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', user_text, flags=re.IGNORECASE)
+        candidates = []
+        for t in raw_tokens:
+            clean = re.sub(
+                r'^(i want|i need|please add|give me|we want|looking for|also|with|a|an|the)\s+',
+                '',
+                t.strip(),
+                flags=re.IGNORECASE
+            ).strip()
+            if len(clean) >= 2 and clean.lower() not in generic_tokens:
+                candidates.append(clean)
+
+        boq_cats = [item.get("category", "").lower() for item in boq_items]
+        boq_names = [item.get("name", "").lower() for item in boq_items]
+
+        synonyms = {
+            "tv": "tv unit",
+            "television": "tv unit",
+            "tv stand": "tv unit",
+            "media console": "tv unit",
+            "couch": "sofa",
+            "center table": "coffee table",
+            "tea table": "coffee table",
+            "standing lamp": "floor lamp",
+            "reading lamp": "table lamp",
+            "closet": "wardrobe",
+            "almirah": "wardrobe"
+        }
+
+        unavailable = []
+        for cand in candidates:
+            cand_low = cand.lower()
+            mapped = synonyms.get(cand_low, cand_low)
+            matched = False
+            for cat in boq_cats:
+                if mapped in cat or cat in mapped:
+                    matched = True
+                    break
+            if not matched:
+                for name in boq_names:
+                    if mapped in name or name in mapped:
+                        matched = True
+                        break
+            if not matched:
+                unavailable.append(cand)
+
+        avail_cats = []
+        for item in boq_items:
+            c = item.get("category")
+            if c and c not in avail_cats:
+                avail_cats.append(c)
+
+        return {
+            "has_unavailable": len(unavailable) > 0,
+            "unavailable_items": unavailable,
+            "available_items": avail_cats,
+            "brand_substitutions": brand_subs
+        }
+
     def get_all_categories(self) -> List[str]:
         """Return list of distinct categories in the catalog."""
         conn = tools.get_db_connection(self.db_path)
@@ -181,6 +277,187 @@ class CatalogAgent:
         cats = [r[0] for r in cursor.fetchall() if r[0]]
         conn.close()
         return cats
+
+    def _normalize_room_type(self, room_type: str) -> str:
+        """Normalizes room type name for matching DB room_types values."""
+        r_low = (room_type or "").lower()
+        if "living" in r_low or "hall" in r_low or "drawing" in r_low:
+            return "Living Room"
+        elif "bed" in r_low:
+            return "Bedroom"
+        elif "dining" in r_low:
+            return "Dining"
+        elif "study" in r_low or "office" in r_low or "wfh" in r_low:
+            return "Study"
+        elif "kid" in r_low or "child" in r_low:
+            return "Kids"
+        return room_type or "Living Room"
+
+    def get_categories_for_room(self, room_type: str = "Living Room") -> List[str]:
+        """Return distinct categories available in catalog for room_type."""
+        norm_room = self._normalize_room_type(room_type)
+        conn = tools.get_db_connection(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT category FROM catalog WHERE LOWER(room_types) LIKE LOWER(?)",
+            (f"%{norm_room}%",)
+        )
+        cats = sorted([r[0] for r in cursor.fetchall() if r[0]])
+        conn.close()
+        return cats
+
+    def find_catalog_item_for_room(
+        self,
+        keyword: str,
+        room_type: str = "Living Room",
+        style: str = "Scandinavian"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Finds a catalog item matching the user's keyword for the given room type and preferred style.
+        Returns the raw DB row as a dict, or None if not found.
+        """
+        cleaned = re.sub(r"^(a|an|the|some|one|new)\s+", "", keyword.strip(), flags=re.IGNORECASE).strip().lower()
+        if not cleaned or len(cleaned) < 2:
+            return None
+
+        # Synonyms mapping
+        synonyms = {
+            "arm chair": "armchair",
+            "armchair": "armchair",
+            "arm chairs": "armchair",
+            "armchairs": "armchair",
+            "chair": "armchair",
+            "chairs": "armchair",
+            "accent chair": "armchair",
+            "accent chairs": "armchair",
+            "lounge chair": "armchair",
+            "lounge chairs": "armchair",
+            "book shelf": "bookshelf",
+            "book shelves": "bookshelf",
+            "bookshelf": "bookshelf",
+            "bookshelves": "bookshelf",
+            "bookcase": "bookshelf",
+            "book case": "bookshelf",
+            "center table": "coffee table",
+            "tea table": "coffee table",
+            "coffee table": "coffee table",
+            "coffeetable": "coffee table",
+            "floor lamp": "floor lamp",
+            "floorlamp": "floor lamp",
+            "standing lamp": "floor lamp",
+            "reading lamp": "table lamp",
+            "table lamp": "table lamp",
+            "lamp": "floor lamp",
+            "lamps": "floor lamp",
+            "light": "floor lamp",
+            "lights": "floor lamp",
+            "lighting": "floor lamp",
+            "side table": "side table",
+            "sidetable": "side table",
+            "end table": "side table",
+            "bean bag": "bean bag",
+            "beanbag": "bean bag",
+            "bean bags": "bean bag",
+            "plant": "planter",
+            "plants": "planter",
+            "planter": "planter",
+            "planters": "planter",
+            "pots": "planter",
+            "pot": "planter",
+            "curtain": "curtains",
+            "curtains": "curtains",
+            "drapes": "curtains",
+            "carpet": "rug",
+            "carpets": "rug",
+            "rug": "rug",
+            "rugs": "rug",
+            "couch": "sofa",
+            "couches": "sofa",
+            "sofa": "sofa",
+            "sofas": "sofa",
+            "sectional": "sofa",
+            "closet": "wardrobe",
+            "almirah": "wardrobe",
+            "cupboard": "wardrobe",
+            "wardrobe": "wardrobe",
+            "painting": "wall art",
+            "art": "wall art",
+            "artwork": "wall art",
+            "wall art": "wall art",
+            "wallart": "wall art",
+            "cushion": "cushions",
+            "cushions": "cushions",
+            "pillow": "cushions",
+            "pillows": "cushions",
+            "pouf": "ottoman",
+            "pouffe": "ottoman",
+            "ottoman": "ottoman",
+            "tv": "tv unit",
+            "television": "tv unit",
+            "tv stand": "tv unit",
+            "tv unit": "tv unit",
+            "tv console": "tv unit",
+            "media console": "tv unit",
+            "entertainment unit": "tv unit"
+        }
+        search_term = synonyms.get(cleaned, cleaned)
+
+        norm_room = self._normalize_room_type(room_type)
+        conn = tools.get_db_connection(self.db_path)
+        cursor = conn.cursor()
+
+        # Query items for this room type, ordering in-stock items first
+        cursor.execute(
+            "SELECT * FROM catalog WHERE LOWER(room_types) LIKE LOWER(?) ORDER BY in_stock DESC",
+            (f"%{norm_room}%",)
+        )
+        candidates = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+        norm_search = norm(search_term)
+        norm_search_sing = re.sub(r"(ies|es|s)$", "", norm_search)
+
+        # 1. Exact or substring category match using normalized strings
+        matching_items = []
+        for item in candidates:
+            cat = item["category"]
+            name = item["name"]
+            norm_cat = norm(cat)
+            norm_name = norm(name)
+            norm_cat_sing = re.sub(r"(ies|es|s)$", "", norm_cat)
+
+            if (
+                norm_search == norm_cat
+                or norm_search_sing == norm_cat_sing
+                or norm_search in norm_cat
+                or (len(norm_cat) >= 4 and norm_cat in norm_search)
+                or norm_search in norm_name
+                or (len(norm_name) >= 4 and norm_name in norm_search)
+            ):
+                matching_items.append(item)
+
+        if not matching_items:
+            return None
+
+        # Prefer in-stock items if available
+        in_stock_matches = [it for it in matching_items if it.get("in_stock", 1) == 1]
+        pool = in_stock_matches if in_stock_matches else matching_items
+
+        # Prefer item matching requested style
+        for item in pool:
+            if style.lower() in (item.get("style_tags") or "").lower():
+                return item
+
+        # Prefer item where search_term is in name
+        for item in pool:
+            if search_term in item["name"].lower():
+                return item
+
+        # Fallback to first matching item
+        return pool[0]
 
     def search_items(
         self,

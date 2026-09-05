@@ -332,7 +332,13 @@ class InteriorDesignAgent:
                 "item_id": item_raw["item_id"],
                 "category": item_raw["category"],
                 "name": item_raw["name"],
+                "style": item_raw.get("style_tags") or style,
+                "style_tags": item_raw.get("style_tags") or style,
                 "dimensions": dim_str,
+                "width_cm": w,
+                "depth_cm": d,
+                "height_cm": h,
+                "color_finish": item_raw.get("color_finish") or "Natural finish",
                 "finish": item_raw.get("color_finish") or "Natural finish",
                 "price_inr": item_raw["price_inr"],
                 "in_stock": item_raw.get("in_stock", 1),
@@ -376,6 +382,37 @@ class InteriorDesignAgent:
         total_spent = calc_result["total_spent"]
         rem_budget = calc_result["remaining_budget"]
         utilization = round((total_spent / budget_inr * 100), 1) if budget_inr > 0 else 0.0
+        max_lead_days = max([x.get("lead_time_days", 7) for x in boq_rows] or [7])
+        rem_area_sqm = round(max(0.0, fit_result["room_area_sqm"] - fit_result["furniture_footprint_sqm"]), 2)
+        rem_area_pct = round(max(0.0, (1.0 - fit_result.get("occupancy_ratio", 0.0)) * 100.0), 1)
+
+        # Generate intelligent budget & styling recommendations
+        recs = {
+            "budget_status": "UNDER" if rem_budget >= 0 else "EXCEEDED",
+            "budget_difference_inr": abs(rem_budget),
+            "max_lead_time_days": max_lead_days,
+            "remaining_area_sqm": rem_area_sqm,
+            "remaining_area_percentage": rem_area_pct
+        }
+
+        if rem_budget < 0:
+            overage = abs(rem_budget)
+            sorted_by_price = sorted(boq_rows, key=lambda x: x.get("price_inr") or 0, reverse=True)
+            top_item = sorted_by_price[0] if sorted_by_price else None
+            top_name = top_item["name"] if top_item else "main seating"
+            top_cat = top_item["category"] if top_item else "furniture"
+            top_price = top_item.get("price_inr", 0) if top_item else 0
+
+            recs["item_recommendation"] = f"Swap {top_cat} '{top_name}' for a compact fabric alternative to save ₹{min(overage, 25000):,} and balance budget."
+            recs["style_recommendation"] = f"Choose streamlined Minimalist profiles over handcrafted {style} pieces to reduce fabrication costs."
+            recs["color_recommendation"] = "Opt for neutral woven fabrics with matte powder-coated finishes instead of expensive leather or brass."
+            recs["summary_text"] = f"⚠️ Budget Exceeded by ₹{overage:,}! Swap {top_cat} '{top_name}' to bring total spend under ₹{budget_inr:,}."
+        else:
+            surplus = rem_budget
+            recs["item_recommendation"] = f"Add an accent armchair or hand-tufted wool rug using your remaining ₹{surplus:,} budget."
+            recs["style_recommendation"] = f"Elevate the {style} theme by pairing warm walnut and oak finishes with ambient lighting."
+            recs["color_recommendation"] = "Layer earthy terracotta, olive green, or soft indigo cushions over neutral upholstery."
+            recs["summary_text"] = f"✅ Budget Under by ₹{surplus:,}! You have surplus budget to add accent seating or designer lighting."
 
         deliverable = {
             "brief_id": brief_id,
@@ -390,14 +427,18 @@ class InteriorDesignAgent:
                 "budget_allocated_inr": budget_inr,
                 "total_spent_inr": total_spent,
                 "remaining_budget_inr": rem_budget,
-                "budget_utilization_percentage": utilization
+                "budget_utilization_percentage": utilization,
+                "max_lead_time_days": max_lead_days
             },
             "spatial_fit_summary": {
                 "room_area_sqm": fit_result["room_area_sqm"],
                 "furniture_footprint_sqm": fit_result["furniture_footprint_sqm"],
+                "remaining_area_sqm": rem_area_sqm,
+                "remaining_area_percentage": rem_area_pct,
                 "occupancy_percentage": fit_result["occupancy_percentage"],
                 "circulation_viable": fit_result["fits_circulation"]
             },
+            "recommendations": recs,
             "trade_offs_and_omissions": trade_offs if trade_offs else [
                 "Prioritized foundational seating and circulation clearance over non-essential accessories."
             ],
