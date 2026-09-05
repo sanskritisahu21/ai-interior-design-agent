@@ -21,11 +21,13 @@ Columns:
 14. final_ship_verdict
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
 import sys
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 import tools
 import guardrails
@@ -54,7 +56,7 @@ def format_inr(amount: Optional[int]) -> str:
     return f"₹{amount}"
 
 
-def get_section_8_trap(tc: Dict[str, Any]) -> Tuple_trap:
+def get_section_8_trap(tc: Dict[str, Any]) -> Tuple[str, str]:
     """Identify the Section 8 trap from the test case."""
     test_id = tc.get("brief_id") or tc.get("test_id", "")
     inp = tc.get("input", tc)
@@ -121,8 +123,6 @@ def get_section_8_trap(tc: Dict[str, Any]) -> Tuple_trap:
         return ("structural_demolition", "Structural modifications safely refused")
     return ("general_brief", "Handled standard brief constraints")
 
-
-Tuple_trap = tuple[str, str]
 
 
 def evaluate_case_scorecard(tc: Dict[str, Any], agent_output: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
