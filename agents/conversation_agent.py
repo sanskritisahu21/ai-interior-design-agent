@@ -34,6 +34,27 @@ class ConversationAgent:
         self.budget_agent = BudgetAgent(db_path=self.db_path)
         self.layout_agent = LayoutAgent(db_path=self.db_path)
 
+    def get_initial_greeting(self, session_id: str) -> Dict[str, Any]:
+        """Returns or logs the initial proactive opening message sent by Siya."""
+        db.get_or_create_session(session_id, db_path=self.db_path)
+        history = db.get_chat_history(session_id, limit=5, db_path=self.db_path)
+        first_greeting = "Hi, I am Siya, your interior design consultant!"
+        if not history:
+            db.add_chat_message(
+                session_id,
+                sender="siya",
+                message=first_greeting,
+                metadata={"stage": "GREETING"},
+                db_path=self.db_path
+            )
+            return {
+                "session_id": session_id,
+                "sender": "siya",
+                "message": first_greeting,
+                "metadata": {"stage": "GREETING"}
+            }
+        return history[0]
+
     def process_message(self, session_id: str, user_text: str) -> Dict[str, Any]:
         """
         Processes an incoming user chat message, updates the session state machine,
@@ -70,16 +91,19 @@ class ConversationAgent:
             if room_found:
                 db.update_session(session_id, db_path=self.db_path, room_type=room_found, stage="DIMENSIONS")
                 response_text = (
-                    f"Hi, I am Siya, your interior design consultant! Wonderful, let's design your {room_found}. "
+                    f"Great! Let's work on your {room_found}. "
                     "What is length * breadth * height of your room? (You can share in meters, feet, or cm)."
                 )
                 metadata["chips"] = ["15 * 12 feet", "4.8 * 3.6 meters", "450 * 350 * 280 cm"]
                 metadata["stage"] = "DIMENSIONS"
+            elif any(p in lower_text for p in ["don't know", "dont know", "confused", "not sure", "no idea"]):
+                response_text = "Sorry, I can't design without room type. Please let me know if you want to design a Living Room, Bedroom, Dining, Study, or Kids Room."
+                metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
+                db.update_session(session_id, db_path=self.db_path, stage="ROOM_TYPE")
             elif is_simple_greeting or len(cleaned_text) < 10:
                 db.update_session(session_id, db_path=self.db_path, stage="ROOM_TYPE")
                 response_text = (
-                    "Hi, I am Siya, your interior design consultant! "
-                    "Please let me know the room type you are designing for - living room, bedroom, dining, study, or kids room."
+                    "Please let me know the room type you are designing for living room, bedroom, dining, etc."
                 )
                 metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
                 metadata["stage"] = "ROOM_TYPE"
@@ -87,8 +111,7 @@ class ConversationAgent:
                 # User sent something else: prompt for room type
                 db.update_session(session_id, db_path=self.db_path, stage="ROOM_TYPE")
                 response_text = (
-                    "Hi, I am Siya, your interior design consultant! "
-                    "Please let me know the room type you are designing for - living room, bedroom, dining, etc."
+                    "Please let me know the room type you are designing for living room, bedroom, dining, etc."
                 )
                 metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
                 metadata["stage"] = "ROOM_TYPE"

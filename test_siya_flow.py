@@ -30,6 +30,11 @@ def test_full_flow():
     print(f"TESTING SIYA CONVERSATION FLOW (Session: {session_id})")
     print("=" * 80)
 
+    # 1. Proactive opening greeting from Siya
+    init_msg = agent.get_initial_greeting(session_id)
+    print(f"🤖 SIYA (Initial Message): {init_msg['message']}")
+    print("-" * 80)
+
     for turn in turns:
         res = agent.process_message(session_id, turn)
         print(f"👤 USER: {turn}")
