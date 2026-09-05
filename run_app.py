@@ -369,12 +369,58 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     /* Chat Messages Stream */
     .chat-messages {
       flex: 1;
-      padding: 24px 28px;
+      min-height: 0;
+      padding: 24px 28px 40px 28px;
       overflow-y: auto;
+      overflow-x: hidden;
       display: flex;
       flex-direction: column;
       gap: 20px;
-      scroll-behavior: smooth;
+    }
+
+    .chat-messages::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .chat-messages::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .chat-messages::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 9999px;
+    }
+
+    .chat-messages::-webkit-scrollbar-thumb:hover {
+      background: rgba(99, 102, 241, 0.5);
+    }
+
+    /* WhatsApp Style Floating Scroll to Bottom Button */
+    .btn-scroll-bottom {
+      position: absolute;
+      bottom: 96px;
+      right: 32px;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: #1e293b;
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      color: #a5b4fc;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      cursor: pointer;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      z-index: 20;
+      transition: all 0.2s ease;
+    }
+
+    .btn-scroll-bottom:hover {
+      background: var(--primary);
+      color: #fff;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px var(--primary-glow);
     }
 
     .message-row {
@@ -825,9 +871,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <!-- Chat Messages Container -->
-      <div class="chat-messages" id="chat-messages">
+      <div class="chat-messages" id="chat-messages" onscroll="handleChatScroll()">
         <!-- Messages will be populated dynamically -->
+        <div id="chat-bottom-anchor" style="height: 1px; width: 100%; flex-shrink: 0; margin-top: 4px;"></div>
       </div>
+
+      <!-- WhatsApp Style Floating Scroll to Bottom Button -->
+      <button class="btn-scroll-bottom" id="btn-scroll-bottom" onclick="scrollToBottom(true)" title="Scroll to latest message">
+        ↓
+      </button>
 
       <!-- Typing Indicator Wave -->
       <div class="typing-indicator" id="typing-indicator">
@@ -880,6 +932,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         appendMessage('bot', 'Hi, I am Siya, your interior design consultant!');
       }
       refreshSidebar();
+      scrollToBottom(false);
     }
 
     async function handleSendMessage() {
@@ -921,6 +974,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('btn-send').disabled = false;
         input.focus();
         refreshSidebar();
+        scrollToBottom(true);
       }
     }
 
@@ -1046,10 +1100,60 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       row.appendChild(avatar);
       row.appendChild(contentWrap);
-      container.appendChild(row);
 
-      // Auto scroll
-      container.scrollTop = container.scrollHeight;
+      // Insert message right before the bottom anchor element
+      const anchor = document.getElementById('chat-bottom-anchor');
+      if (anchor && anchor.parentNode === container) {
+        container.insertBefore(row, anchor);
+      } else {
+        container.appendChild(row);
+      }
+
+      // WhatsApp auto-scroll with smooth animation
+      scrollToBottom(true);
+    }
+
+    function scrollToBottom(smooth = true) {
+      const container = document.getElementById('chat-messages');
+      const anchor = document.getElementById('chat-bottom-anchor');
+      if (!container) return;
+
+      // 1. Force container scroll offset
+      container.scrollTop = container.scrollHeight + 10000;
+
+      // 2. Scroll anchor element into view (native WhatsApp behavior)
+      if (anchor) {
+        anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+      }
+
+      // 3. Animation frame catch-up
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight + 10000;
+        if (anchor) anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+      });
+
+      // 4. Timeouts for async layout reflow (cards, fonts, tables)
+      setTimeout(() => {
+        container.scrollTop = container.scrollHeight + 10000;
+        if (anchor) anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+      }, 50);
+
+      setTimeout(() => {
+        container.scrollTop = container.scrollHeight + 10000;
+        if (anchor) anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+      }, 200);
+    }
+
+    function handleChatScroll() {
+      const container = document.getElementById('chat-messages');
+      const btn = document.getElementById('btn-scroll-bottom');
+      if (!container || !btn) return;
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      if (distanceFromBottom > 150) {
+        btn.style.display = 'flex';
+      } else {
+        btn.style.display = 'none';
+      }
     }
 
     function toggleReasoning(elem) {
@@ -1060,14 +1164,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       } else {
         body.style.display = 'flex';
         elem.querySelector('span').innerText = '▼ Hide ReAct Agent Reasoning Audit';
+        scrollToBottom(true);
       }
     }
 
     function showTyping(show) {
       const indicator = document.getElementById('typing-indicator');
       indicator.style.display = show ? 'flex' : 'none';
-      const container = document.getElementById('chat-messages');
-      container.scrollTop = container.scrollHeight;
+      if (show) {
+        scrollToBottom(true);
+      }
     }
 
     async function refreshSidebar() {
