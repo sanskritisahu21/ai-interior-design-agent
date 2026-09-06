@@ -109,6 +109,11 @@ class ConversationAgent:
         if stage == "GREETING" and any(re.match(p, lower) for p in [r"^(hi|hii|hiii|hello|hey|greetings|namaste)$"]):
             return False
 
+        # In GREETING or ROOM_TYPE stage, if a room type is detected in text (e.g. "hotel room", "living room", "bedroom"), let deterministic room handling process it
+        if stage in ["GREETING", "ROOM_TYPE"] and self._detect_room_type(clean):
+            if not any(lower.startswith(q) for q in ["what", "which", "how", "can you", "do you", "tell me"]):
+                return False
+
         # Any other message (questions, "hotel", "hotel room", "Yeah", "yes", "i don't have any choice", "you choose", "surprise me", "minimal", etc.) is conversational!
         return True
 
@@ -158,8 +163,13 @@ class ConversationAgent:
 
         # 1. Update session state with any newly extracted entities
         new_updates = {}
+        detected_room = None
         if extracted.get("room_type") and not session.get("room_type"):
             detected_room = self._detect_room_type(extracted["room_type"]) or extracted["room_type"]
+        elif not session.get("room_type") and current_stage in ["GREETING", "ROOM_TYPE"]:
+            detected_room = self._detect_room_type(user_text)
+
+        if detected_room:
             new_updates["room_type"] = detected_room
             if current_stage in ["GREETING", "ROOM_TYPE"]:
                 new_updates["stage"] = "DIMENSIONS"
@@ -933,9 +943,55 @@ class ConversationAgent:
             elif "reduce" in lower_text or "cheaper" in lower_text or "budget" in lower_text:
                 b_res = self.budget_agent.parse_budget_input(user_text)
                 if not b_res["is_skipped"] and b_res.get("budget_target"):
-                    db.update_session(session_id, db_path=self.db_path, budget_max=b_res["budget_target"])
+                    budget_val = b_res["budget_target"]
+                    db.update_session(session_id, db_path=self.db_path, budget_max=budget_val)
 
-                revised_plan = self._synthesize_plan(session_id, force_cheaper=True)
+                # Attempt to optimize current BOQ by finding cheaper alternatives in catalog
+                current_boq = list(plan.get("boq", []))
+                optimized_boq = []
+                swapped_cheaper = []
+
+                for item in current_boq:
+                    cat = item.get("category")
+                    cur_price = item.get("price_inr") or 0
+                    cat_items = tools.catalog_search(category=cat, room_type=room_t, in_stock_only=True, db_path=self.db_path)
+                    cheaper_alts = [
+                        x for x in cat_items
+                        if x.get("price_inr") is not None and x.get("price_inr") > 0 and x.get("price_inr") < cur_price
+                    ]
+                    if cheaper_alts:
+                        cheaper_alts.sort(key=lambda x: x.get("price_inr") or 0)
+                        best_alt = cheaper_alts[0]
+                        alt_price = int(best_alt.get("price_inr") or 0)
+                        new_row = self._create_boq_row(best_alt, preferred_style=pref_style)
+                        optimized_boq.append(new_row)
+                        swapped_cheaper.append(f"{item.get('name')} -> {best_alt.get('name')} (saved ₹{cur_price - alt_price:,})")
+                    else:
+                        optimized_boq.append(item)
+
+                temp_plan = dict(plan)
+                temp_plan["boq"] = optimized_boq
+                temp_plan = self._recalculate_plan_metrics(temp_plan, length_cm, width_cm, budget_val, pref_style, room_type=room_t)
+                optimized_spend = temp_plan["financial_summary"]["total_spent_inr"]
+                current_spend = plan["financial_summary"]["total_spent_inr"]
+
+                # Compare with synthetic cheaper plan
+                synth_plan = self._synthesize_plan(session_id, force_cheaper=True)
+                synth_spend = synth_plan["financial_summary"]["total_spent_inr"]
+
+                if swapped_cheaper and optimized_spend < current_spend:
+                    revised_plan = temp_plan
+                    swap_note = "Swapped for more economical catalog pieces: " + ", ".join(swapped_cheaper) + "."
+                elif synth_spend < current_spend:
+                    revised_plan = synth_plan
+                    swap_note = "Streamlined the plan with our most cost-efficient core catalog essentials."
+                elif optimized_spend <= current_spend:
+                    revised_plan = temp_plan
+                    swap_note = "Your current item selections are already at their most budget-friendly tier in our catalog!"
+                else:
+                    revised_plan = plan
+                    swap_note = f"Your current design plan spend is already optimized at ₹{current_spend:,}."
+
                 db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(revised_plan))
                 recs = revised_plan.get("recommendations", {})
 
@@ -943,8 +999,14 @@ class ConversationAgent:
                 rec_style = recs.get("style_recommendation", "")
                 rec_color = recs.get("color_recommendation", "")
 
+                fin = revised_plan["financial_summary"]
+                rem_b = fin["remaining_budget_inr"]
+                b_status = f"₹{fin['total_spent_inr']:,} (₹{rem_b:,} remaining within budget)" if rem_b >= 0 else f"₹{fin['total_spent_inr']:,} (exceeds budget by ₹{abs(rem_b):,})"
+
                 response_text = (
-                    "I've revised the plan to be more budget-friendly!\n\n"
+                    f"I've revised the plan to be more budget-friendly!\n"
+                    f"{swap_note}\n\n"
+                    f"Your updated total spend is {b_status}.\n\n"
                     f"💡 Recommendations:\n"
                     f"• Items: {rec_item}\n"
                     f"• Style: {rec_style}\n"
