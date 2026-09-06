@@ -32,6 +32,10 @@ import db
 import tools
 from agent import InteriorDesignAgent
 from agents.conversation_agent import ConversationAgent
+from agents.gemini_service import load_api_key
+
+# Safely load Gemini API key from environment, geminiapikey.env, or .env
+load_api_key()
 
 # Ensure UTF-8 output on Windows terminals
 if hasattr(sys.stdout, "reconfigure"):

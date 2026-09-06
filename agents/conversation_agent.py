@@ -21,6 +21,7 @@ import tools
 from .catalog_agent import CatalogAgent
 from .budget_agent import BudgetAgent
 from .layout_agent import LayoutAgent
+from .gemini_service import GeminiService
 
 DB_PATH = tools.DB_PATH
 
@@ -33,6 +34,7 @@ class ConversationAgent:
         self.catalog_agent = CatalogAgent(db_path=self.db_path)
         self.budget_agent = BudgetAgent(db_path=self.db_path)
         self.layout_agent = LayoutAgent(db_path=self.db_path)
+        self.gemini_service = GeminiService()
 
     def get_initial_greeting(self, session_id: str) -> Dict[str, Any]:
         """Returns or logs the initial proactive opening message sent by Siya."""
@@ -152,6 +154,158 @@ class ConversationAgent:
 
         return None
 
+    def _is_question_or_conversational(self, text: str, stage: str = "") -> bool:
+        """Determines if the user's input is a conversational inquiry, design question, or complex query."""
+        clean = text.strip()
+
+        # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked a question
+        if stage == "MUST_HAVES" or ("," in clean and len(clean.split(",")) >= 2):
+            if "?" not in clean:
+                return False
+
+        if "?" in clean:
+            # Exclude plan modification triggers like 'why are you not adding'
+            if re.search(r"\bwhy (?:are|aren't|arent|didn't|didnt|not|haven't|havent)\b", clean.lower()):
+                return False
+            return True
+        lower = clean.lower()
+        question_words = [
+            "what", "why", "how", "can you", "could you", "tell me", "explain",
+            "suggest", "recommend", "which", "difference between", "advice",
+            "opinion", "ideas", "color", "palette", "material",
+            "confused", "meaning of", "help me choose", "what about", "is it possible"
+        ]
+        if any(re.search(rf"\b{re.escape(w)}\b", lower) for w in question_words):
+            return True
+        # If user typed a natural conversational sentence (6+ words), but not a comma-separated must-haves list
+        if len(clean.split()) >= 6 and "," not in clean:
+            return True
+        return False
+
+    def _handle_gemini_turn(
+        self,
+        session_id: str,
+        user_text: str,
+        session: Dict[str, Any],
+        current_stage: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Processes a conversational turn using Gemini:
+        1. Generates rich, empathetic, and knowledgeable interior design advice.
+        2. Intelligently updates session entities (room, dimensions, budget, style) if extracted.
+        3. Coordinates with existing catalog and BOQ synthesis tools.
+        """
+        if not self.gemini_service.is_configured():
+            return None
+
+        # Fetch recent chat history
+        history = db.get_chat_history(session_id, limit=8, db_path=self.db_path)
+
+        room_t = session.get("room_type") or "Living Room"
+        categories = self.catalog_agent.get_categories_for_room(room_t)
+        catalog_info = {
+            "styles": ["Scandinavian", "Contemporary", "Mid-Century", "Bohemian", "Industrial", "Minimalist"],
+            "categories": categories[:8]
+        }
+
+        try:
+            gemini_res = self.gemini_service.generate_chat_reply(
+                user_message=user_text,
+                chat_history=history,
+                session_state=session,
+                catalog_info=catalog_info
+            )
+        except Exception:
+            return None
+
+        if not gemini_res or not isinstance(gemini_res, dict) or not gemini_res.get("reply"):
+            return None
+
+        reply_text = gemini_res.get("reply", "").strip()
+        chips = gemini_res.get("chips", []) or []
+        extracted = gemini_res.get("extracted", {}) or {}
+        action = gemini_res.get("action", "CONTINUE")
+
+        # 1. Update session state with any newly extracted entities
+        new_updates = {}
+        if extracted.get("room_type") and not session.get("room_type"):
+            detected_room = self._detect_room_type(extracted["room_type"]) or extracted["room_type"]
+            new_updates["room_type"] = detected_room
+            if current_stage in ["GREETING", "ROOM_TYPE"]:
+                new_updates["stage"] = "DIMENSIONS"
+
+        if extracted.get("length_cm") and extracted.get("width_cm"):
+            new_updates["length_cm"] = int(extracted["length_cm"])
+            new_updates["width_cm"] = int(extracted["width_cm"])
+            new_updates["height_cm"] = int(extracted.get("height_cm") or session.get("height_cm") or 280)
+            if current_stage in ["GREETING", "ROOM_TYPE", "DIMENSIONS"]:
+                new_updates["stage"] = "BUDGET"
+
+        if extracted.get("budget_inr"):
+            new_updates["budget_max"] = int(extracted["budget_inr"])
+            if current_stage in ["GREETING", "ROOM_TYPE", "DIMENSIONS", "BUDGET"]:
+                new_updates["stage"] = "STYLE"
+
+        if extracted.get("style"):
+            is_valid, matched, _ = self.catalog_agent.validate_style(extracted["style"])
+            if is_valid and matched:
+                new_updates["style"] = matched
+                if current_stage in ["GREETING", "ROOM_TYPE", "DIMENSIONS", "BUDGET", "STYLE"]:
+                    new_updates["stage"] = "MUST_HAVES"
+
+        if extracted.get("must_haves"):
+            if isinstance(extracted["must_haves"], list):
+                new_updates["must_haves"] = json.dumps(extracted["must_haves"])
+            else:
+                new_updates["must_haves"] = json.dumps([str(extracted["must_haves"])])
+
+        if new_updates:
+            db.update_session(session_id, db_path=self.db_path, **new_updates)
+            session = db.get_or_create_session(session_id, db_path=self.db_path)
+
+        metadata: Dict[str, Any] = {
+            "chips": chips or ["Living Room", "Bedroom", "Dining", "Study"],
+            "cards": [],
+            "stage": session.get("stage", current_stage)
+        }
+
+        # 2. Attach or handle plan if applicable
+        raw_plan = session.get("current_plan_json")
+        current_plan = json.loads(raw_plan) if raw_plan else None
+
+        # Check if plan should be synthesized
+        if action == "GENERATE_PLAN" or (
+            session.get("room_type") and 
+            session.get("length_cm") and 
+            session.get("width_cm") and 
+            session.get("style") and 
+            not current_plan and
+            current_stage in ["MUST_HAVES", "STYLE"]
+        ):
+            current_plan = self._synthesize_plan(session_id)
+            db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(current_plan), stage="PLAN_REVISION")
+            self._auto_score_session(session_id)
+            metadata["stage"] = "PLAN_REVISION"
+
+        if current_plan:
+            metadata["plan"] = current_plan
+
+        # Log Siya's response to SQLite
+        db.add_chat_message(
+            session_id,
+            sender="siya",
+            message=reply_text,
+            metadata=metadata,
+            db_path=self.db_path
+        )
+
+        return {
+            "session_id": session_id,
+            "sender": "siya",
+            "message": reply_text,
+            "metadata": metadata
+        }
+
     def process_message(self, session_id: str, user_text: str) -> Dict[str, Any]:
         """
         Processes an incoming user chat message, updates the session state machine,
@@ -182,6 +336,12 @@ class ConversationAgent:
                     "chips": ["Living Room", "Bedroom", "Dining", "Study"] if stage in ["GREETING", "ROOM_TYPE"] else []
                 }
             }
+
+        # Check if user message is a conversational question / inquiry
+        if self.gemini_service.is_configured() and self._is_question_or_conversational(cleaned_text, stage):
+            gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
+            if gemini_res:
+                return gemini_res
 
         response_text = ""
         metadata: Dict[str, Any] = {
@@ -248,6 +408,10 @@ class ConversationAgent:
                     metadata["chips"] = ["14 * 12 feet", "4.5 * 3.8 meters", "400 * 350 * 280 cm", "I don't know"]
                     metadata["stage"] = "DIMENSIONS"
                 else:
+                    if self.gemini_service.is_configured():
+                        gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
+                        if gemini_res:
+                            return gemini_res
                     response_text = "Sorry, I can't design without room type. Please specify whether it is a Living Room, Bedroom, Dining, Study, or Kids Room."
                     metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
 
@@ -263,6 +427,10 @@ class ConversationAgent:
             )
 
             if dim_res["is_confused"]:
+                if self.gemini_service.is_configured():
+                    gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
+                    if gemini_res:
+                        return gemini_res
                 response_text = "Sorry, we need length, breadth, and height; we can't make an interior design plan without it. Even an estimate (like 12 * 10 feet) will help us get started!"
                 metadata["chips"] = ["12 * 10 feet", "15 * 12 feet", "4.5 * 3.5 meters"]
             elif dim_res["is_complete"]:
@@ -730,6 +898,10 @@ class ConversationAgent:
 
             # 8. Fallback
             else:
+                if self.gemini_service.is_configured():
+                    gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
+                    if gemini_res:
+                        return gemini_res
                 response_text = (
                     "Your customized BOQ plan is saved! You can ask to add any item (e.g. 'add an armchair', 'add a bookshelf'), "
                     "remove any item (e.g. 'remove coffee table'), swap items, or adjust your budget."
