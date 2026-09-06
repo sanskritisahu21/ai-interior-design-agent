@@ -806,26 +806,84 @@ class ConversationAgent:
                     metadata["plan"] = plan
                     metadata["chips"] = ["Looks great!", "Add an item", "Make it cheaper", "Start over"]
 
-            # 6. ADD intent (e.g. "add an armchair", "add arm chair", "why are you not adding armchair?", "can we add a rug", "add floor lamp", "add jacuzzi")
+            # 6. ADD / INQUIRE intent (e.g. "add an armchair", "light?", "what about lights?", "why are you not adding armchair?", "can we add a rug", "add floor lamp", "add jacuzzi")
             elif add_target:
                 raw_target = add_target
                 clean_target = re.sub(r"\b(to the room|to the plan|in the room|in the plan|please|as well|also)\b", "", raw_target, flags=re.IGNORECASE).strip().strip("?.!,")
 
-                candidates = [re.sub(r"^(?:a|an|the|some)\s+", "", c.strip(), flags=re.IGNORECASE).strip() for c in re.split(r",|\s+and\s+|\s+&\s+", clean_target) if c.strip()]
+                is_explicit_additional = bool(re.search(
+                    r"\b(another|extra|second|2nd|two|2|more|additional|one more|plus)\b",
+                    lower_text
+                ))
+
+                candidates = [
+                    re.sub(r"^(?:a|an|the|some|another|extra|second|2nd|additional|one more)\s+", "", c.strip(), flags=re.IGNORECASE).strip()
+                    for c in re.split(r",|\s+and\s+|\s+&\s+", clean_target) if c.strip()
+                ]
                 added_items = []
+                already_present_items = []
                 missing_items = []
 
                 for cand in candidates:
                     matched_item = self.catalog_agent.find_catalog_item_for_room(cand, room_type=room_t, style=pref_style)
-                    if matched_item:
+                    existing_match = self._find_existing_boq_item(plan.get("boq", []), cand, matched_item)
+
+                    if existing_match and not is_explicit_additional:
+                        already_present_items.append({"cand": cand, "existing": existing_match, "matched": matched_item})
+                    elif matched_item:
                         new_row = self._create_boq_row(matched_item, preferred_style=pref_style)
                         plan["boq"].append(new_row)
                         added_items.append(matched_item)
                     else:
                         missing_items.append(cand)
 
-                if not added_items:
-                    # Item is NOT present in catalog for that room
+                # Branch A: No items added, but inquired item is already present in the active plan
+                if not added_items and already_present_items:
+                    ex_first = already_present_items[0]["existing"]
+                    ex_name = ex_first.get("name", "Item")
+                    ex_cat = ex_first.get("category", "Item")
+                    ex_price = ex_first.get("price_inr", 0)
+
+                    cand_first = already_present_items[0]["cand"].lower()
+                    is_light_inq = any(w in cand_first for w in ["light", "lamp", "lighting"]) or ("lamp" in ex_cat.lower() or "light" in ex_cat.lower())
+
+                    if is_light_inq:
+                        alt_lights = [
+                            r for r in tools.catalog_search(room_type=room_t, in_stock_only=True, db_path=self.db_path)
+                            if ("lamp" in r.get("category", "").lower() or "light" in r.get("category", "").lower())
+                            and r.get("item_id") != ex_first.get("item_id")
+                        ]
+                        alt_desc = ""
+                        if alt_lights:
+                            alt_names = [f"{a['name']} ({a['category']} at ₹{a['price_inr']:,})" for a in alt_lights[:2]]
+                            alt_desc = f"\n• **Swap options**: You can swap it with {', or '.join(alt_names)}."
+
+                        response_text = (
+                            f"💡 Your design plan already includes the **{ex_name} ({ex_cat})** priced at ₹{ex_price:,}!\n\n"
+                            f"Here are your options for lighting in your {pref_style} {room_t}:\n"
+                            f"• **Current fixture**: It provides warm ambient lighting tailored for your room.{alt_desc}\n"
+                            f"• **Swap**: You can swap it for another fixture (e.g. *'swap floor lamp for table lamp'*).\n"
+                            f"• **Add extra**: If you would like an additional fixture in the room, simply reply *'add another lamp'* or *'add table lamp'*."
+                        )
+                        metadata["chips"] = ["Swap with Table Lamp", "Add another lamp", "Looks great!", "Make it cheaper"]
+                    else:
+                        response_text = (
+                            f"Your design plan already includes the **{ex_name} ({ex_cat})** priced at ₹{ex_price:,}.\n\n"
+                            f"Here are your options:\n"
+                            f"• **Keep it**: It is currently active in your 9-field itemized BOQ table below.\n"
+                            f"• **Swap**: To change model or style, ask *'swap {ex_cat} for [item]'*.\n"
+                            f"• **Add another**: If you would like an extra one, ask *'add another {ex_cat}'*.\n"
+                            f"• **Remove**: To remove it, ask *'remove {ex_cat}'*."
+                        )
+                        metadata["chips"] = [f"Swap {ex_cat}", f"Add another {ex_cat}", "Looks great!", "Make it cheaper"]
+
+                    if missing_items:
+                        response_text += f"\n\n(Note: We don't have {', '.join(missing_items)} in our catalog for {room_t}.)"
+
+                    metadata["plan"] = plan
+
+                # Branch B: No items added and none present (unsupported in catalog)
+                elif not added_items:
                     room_categories = self.catalog_agent.get_categories_for_room(room_t)
                     cats_preview = ", ".join(room_categories[:6])
                     response_text = (
@@ -834,6 +892,8 @@ class ConversationAgent:
                     )
                     metadata["plan"] = plan
                     metadata["chips"] = [f"Add {c}" for c in room_categories[:3]] + ["Looks great!"]
+
+                # Branch C: Genuinely new items added
                 else:
                     plan = self._recalculate_plan_metrics(plan, length_cm, width_cm, budget_val, pref_style, room_type=room_t)
                     db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(plan))
@@ -845,6 +905,7 @@ class ConversationAgent:
                     recs = plan["recommendations"]
 
                     added_names = ", ".join([f"{it['name']} ({it['category']})" for it in added_items])
+                    already_msg = f"\n(Note: Your plan already includes {', '.join([it['existing']['name'] for it in already_present_items])})" if already_present_items else ""
                     missing_msg = f"\n(Note: We don't have {', '.join(missing_items)} in our catalog for {room_t})" if missing_items else ""
 
                     spatial = plan.get("spatial_fit_summary", {})
@@ -857,7 +918,7 @@ class ConversationAgent:
                         budget_alert = f"\n⚠️ Budget Notice: This addition exceeds your allocated budget of ₹{budget_val:,} by ₹{abs(rem_b):,}."
 
                     response_text = (
-                        f"✅ Added {added_names} to your design plan!{missing_msg}{budget_alert}{spatial_alert}\n"
+                        f"✅ Added {added_names} to your design plan!{already_msg}{missing_msg}{budget_alert}{spatial_alert}\n"
                         f"Your updated total spend is {b_status}.\n\n"
                         f"💡 Recommendations:\n"
                         f"• Items: {recs.get('item_recommendation', '')}\n"
@@ -1104,9 +1165,9 @@ class ConversationAgent:
         if m_what:
             return re.sub(r"[?.!,;]+$", "", m_what.group(1)).strip()
 
-        # 3. Can we have X / can we get X / do you have X / do we have X / is there X / are there X
+        # 3. Can we have X / can we get X / do you have X / do we have X / is there X / are there X / where is X / where are X
         m_have = re.search(
-            r"\b(?:can we have|can i have|can we get|can i get|could we have|could we get|do you have|do we have|is there|are there|have you got)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
+            r"\b(?:can we have|can i have|can we get|can i get|could we have|could we get|do you have|do we have|is there|are there|have you got|where is|where are|why no|why not)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
             text,
             re.I
         )
@@ -1284,6 +1345,102 @@ class ConversationAgent:
                 new_boq.append(item)
 
         return removed_item, new_boq
+
+    def _find_existing_boq_item(
+        self,
+        boq: List[Dict[str, Any]],
+        target_query: str,
+        matched_item: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Finds if an item in the active BOQ matches target_query or matched_item.
+        Checks item_id, category, name, lighting taxonomy, and domain synonyms (e.g. 'light' -> 'Floor Lamp').
+        """
+        if not boq:
+            return None
+
+        cleaned = (target_query or "").strip().lower()
+
+        # 1. Exact catalog product match by product_id / item_id
+        if matched_item:
+            m_id = matched_item.get("item_id") or matched_item.get("product_id")
+            for it in boq:
+                it_id = it.get("item_id") or it.get("product_id")
+                if m_id and it_id and m_id == it_id:
+                    return it
+
+        # 2. Lighting check: if query or matched_item is lighting/lamp, match any lighting fixture in boq
+        is_lighting = any(w in cleaned for w in ["light", "lamp", "lighting", "fixture", "illumination"])
+        if not is_lighting and matched_item:
+            m_cat_lower = (matched_item.get("category") or "").lower()
+            if "lamp" in m_cat_lower or "light" in m_cat_lower:
+                is_lighting = True
+
+        if is_lighting:
+            for it in boq:
+                it_cat = (it.get("category") or "").lower()
+                it_name = (it.get("name") or "").lower()
+                if "lamp" in it_cat or "light" in it_cat or "lamp" in it_name or "light" in it_name:
+                    return it
+
+        # 3. Category match with matched_item
+        if matched_item:
+            m_cat = (matched_item.get("category") or "").strip().lower()
+            m_name = (matched_item.get("name") or "").strip().lower()
+            for it in boq:
+                it_cat = (it.get("category") or "").strip().lower()
+                it_name = (it.get("name") or "").strip().lower()
+                if m_cat and it_cat and m_cat == it_cat:
+                    return it
+                if m_name and it_name and m_name == it_name:
+                    return it
+
+        # 4. Use synonyms lookup (aligned with remove handler)
+        synonyms = {
+            "arm chair": "armchair", "armchair": "armchair", "chair": "armchair", "accent chair": "armchair",
+            "book shelf": "bookshelf", "bookshelf": "bookshelf", "bookcase": "bookshelf",
+            "center table": "coffee table", "tea table": "coffee table", "coffee table": "coffee table",
+            "floor lamp": "floor lamp", "standing lamp": "floor lamp", "reading lamp": "table lamp", "table lamp": "table lamp",
+            "lamp": "floor lamp", "lamps": "floor lamp", "light": "floor lamp", "lights": "floor lamp", "lighting": "floor lamp",
+            "side table": "side table", "end table": "side table", "bean bag": "bean bag",
+            "plant": "planter", "plants": "planter", "planter": "planter", "pots": "planter",
+            "curtain": "curtains", "curtains": "curtains", "drapes": "curtains",
+            "carpet": "rug", "carpets": "rug", "rug": "rug", "rugs": "rug",
+            "couch": "sofa", "couches": "sofa", "sofa": "sofa", "sofas": "sofa",
+            "wardrobe": "wardrobe", "closet": "wardrobe", "almirah": "wardrobe",
+            "painting": "wall art", "art": "wall art", "artwork": "wall art", "wall art": "wall art",
+            "cushion": "cushions", "cushions": "cushions", "pillow": "cushions",
+            "tv": "tv unit", "television": "tv unit", "tv stand": "tv unit", "tv unit": "tv unit", "tv console": "tv unit"
+        }
+        mapped = synonyms.get(cleaned, cleaned)
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+        norm_mapped = norm(mapped)
+        norm_clean = norm(cleaned)
+        norm_sing = re.sub(r"(ies|es|s)$", "", norm_mapped)
+
+        for it in boq:
+            cat = it.get("category") or ""
+            name = it.get("name") or ""
+            norm_cat = norm(cat)
+            norm_name = norm(name)
+            norm_cat_sing = re.sub(r"(ies|es|s)$", "", norm_cat)
+
+            if (
+                norm_mapped == norm_cat
+                or norm_sing == norm_cat_sing
+                or norm_clean == norm_cat
+                or norm_mapped in norm_cat
+                or (len(norm_cat) >= 4 and norm_cat in norm_mapped)
+                or norm_mapped in norm_name
+                or norm_clean in norm_name
+                or (len(norm_name) >= 4 and norm_name in norm_mapped)
+            ):
+                return it
+
+        return None
 
     def _recalculate_plan_metrics(
         self,

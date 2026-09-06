@@ -148,6 +148,17 @@ class GeminiService:
         history_text = "\n".join(formatted_history) if formatted_history else "No prior messages."
 
         # Current session memory
+        boq_summary = "None yet"
+        raw_plan = session_state.get("current_plan_json")
+        if raw_plan:
+            try:
+                plan_data = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+                boq_items = [f"{it.get('name')} ({it.get('category')}) - ₹{it.get('price_inr', 0):,}" for it in plan_data.get("boq", [])]
+                if boq_items:
+                    boq_summary = "; ".join(boq_items)
+            except Exception:
+                pass
+
         current_state_summary = (
             f"Room Type: {session_state.get('room_type') or 'Not specified yet'}\n"
             f"Dimensions: {session_state.get('length_cm')}x{session_state.get('width_cm')}x{session_state.get('height_cm')} cm "
@@ -155,7 +166,8 @@ class GeminiService:
             f"Budget Max: ₹{session_state.get('budget_max') or 'Not specified yet'}\n"
             f"Style: {session_state.get('style') or 'Not specified yet'}\n"
             f"Must-Haves: {session_state.get('must_haves') or 'None listed yet'}\n"
-            f"Current Stage: {session_state.get('stage') or 'GREETING'}"
+            f"Current Stage: {session_state.get('stage') or 'GREETING'}\n"
+            f"Active BOQ Plan Items: {boq_summary}"
         )
 
         catalog_summary = (
