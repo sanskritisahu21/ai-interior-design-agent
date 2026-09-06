@@ -570,7 +570,37 @@ class ConversationAgent:
                 )
 
             # Save must-haves to session
-            must_haves_list = [m.strip() for m in user_text.split(",") if m.strip()]
+            raw_must_tokens = re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', user_text, flags=re.IGNORECASE)
+            extracted_items = []
+            known_words = {
+                "curtains", "curtain", "drapes", "sheers", "plants", "plant", "planter", "planters", "greenery",
+                "carpet", "carpets", "rug", "rugs", "lights", "light", "lighting", "lamp", "lamps",
+                "sofa", "couch", "coffee table", "center table", "tv", "tv unit", "tv console",
+                "armchair", "chair", "bookshelf", "wardrobe", "cushions", "ottoman"
+            }
+            for tok in raw_must_tokens:
+                c = re.sub(r'^(?:with|i want|i need|please add|give me|also|and|a|an|the)\s+', '', tok.strip(), flags=re.I).strip()
+                words = c.split()
+                if len(words) > 1 and any(w.lower() in known_words for w in words):
+                    sub_list = []
+                    curr = []
+                    for w in words:
+                        if w.lower() in known_words:
+                            if curr:
+                                sub_list.append(" ".join(curr))
+                                curr = []
+                            sub_list.append(w)
+                        else:
+                            curr.append(w)
+                    if curr:
+                        sub_list.append(" ".join(curr))
+                    for s in sub_list:
+                        if len(s) >= 2:
+                            extracted_items.append(s.strip())
+                elif len(c) >= 2:
+                    extracted_items.append(c)
+
+            must_haves_list = extracted_items if extracted_items else [m.strip() for m in user_text.split(",") if m.strip()]
             if not must_haves_list or "all" in lower_text:
                 must_haves_list = default_must_haves
 
@@ -602,6 +632,26 @@ class ConversationAgent:
                 )
             else:
                 intro_text = f"🎉 Here is your customized interior design plan for your {room_t}!"
+                # Explicitly summarize requested must-haves included in the plan
+                included_matches = []
+                for b_item in boq:
+                    b_cat = (b_item.get("category") or "").lower()
+                    b_name = b_item.get("name")
+                    for req in must_haves_list:
+                        r_low = req.lower()
+                        if (
+                            r_low in b_cat or b_cat in r_low
+                            or (r_low in ["plant", "plants"] and "planter" in b_cat)
+                            or (r_low in ["curtain", "curtains"] and "curtain" in b_cat)
+                            or (r_low in ["carpet", "carpets", "rug", "rugs"] and "rug" in b_cat)
+                            or (r_low in ["light", "lights", "lighting", "lamp", "lamps"] and ("lamp" in b_cat or "light" in b_cat))
+                        ):
+                            line = f"• **{b_item['category']}**: {b_name}"
+                            if line not in included_matches:
+                                included_matches.append(line)
+                            break
+                if included_matches and len(must_haves_list) > 1 and "all" not in lower_text:
+                    intro_text += f"\n\n**Included from your requested must-haves:**\n" + "\n".join(included_matches)
 
             # Brand substitutions note if applicable
             for orig_brand, sub_brand in coverage.get("brand_substitutions", []):
@@ -816,20 +866,46 @@ class ConversationAgent:
                     metadata["plan"] = plan
                     metadata["chips"] = ["Looks great!", "Add an item", "Make it cheaper", "Start over"]
 
-            # 6. ADD / INQUIRE intent (e.g. "add an armchair", "light?", "what about lights?", "why are you not adding armchair?", "can we add a rug", "add floor lamp", "add jacuzzi")
+            # 6. ADD / INQUIRE intent (e.g. "add an armchair", "light?", "what about lights?", "why are you not adding armchair?", "plants i mentioned before", "can we add a rug", "add floor lamp", "add jacuzzi")
             elif add_target:
                 raw_target = add_target
-                clean_target = re.sub(r"\b(to the room|to the plan|in the room|in the plan|please|as well|also)\b", "", raw_target, flags=re.IGNORECASE).strip().strip("?.!,")
+                clean_target = re.sub(
+                    r"\b(?:to the room|to the plan|in the room|in the plan|please|as well|also|i\s+mentioned\s+(?:before|earlier)|that\s+i\s+(?:mentioned|said|asked\s+for|talked\s+about)\s+(?:before|earlier)?|i\s+(?:said|told\s+you|asked\s+for|talked\s+about)\s+(?:before|earlier)|from\s+before|we\s+(?:talked\s+about|discussed)|as\s+i\s+said(?:\s+earlier)?|you\s+missed|you\s+ignored|which\s+i\s+said|previously|earlier|before)\b",
+                    "",
+                    raw_target,
+                    flags=re.IGNORECASE
+                ).strip().strip("?.!,")
 
                 is_explicit_additional = bool(re.search(
                     r"\b(another|extra|second|2nd|two|2|more|additional|one more|plus)\b",
                     lower_text
                 ))
 
-                candidates = [
+                raw_cands = [
                     re.sub(r"^(?:a|an|the|some|another|extra|second|2nd|additional|one more)\s+", "", c.strip(), flags=re.IGNORECASE).strip()
-                    for c in re.split(r",|\s+and\s+|\s+&\s+", clean_target) if c.strip()
+                    for c in re.split(r",|\s+and\s+|\s+&\s+|\s+\+\s+", clean_target) if c.strip()
                 ]
+                candidates = []
+                for rc in raw_cands:
+                    rc_clean = re.sub(r"^(?:a|an|the|some)\s+", "", rc, flags=re.I).strip()
+                    if not rc_clean:
+                        continue
+                    # 1. If rc_clean is directly a catalog item (e.g. "floor lamp", "coffee table", "armchair"), keep intact!
+                    if self.catalog_agent.find_catalog_item_for_room(rc_clean, room_type=room_t, style=pref_style):
+                        candidates.append(rc_clean)
+                    else:
+                        # 2. If it's a concatenated list of multiple items (e.g. "curtains plants"), decompose it
+                        words = rc_clean.split()
+                        decomposed = []
+                        for w in words:
+                            w_clean = w.strip("?.!,")
+                            if len(w_clean) >= 2 and self.catalog_agent.find_catalog_item_for_room(w_clean, room_type=room_t, style=pref_style):
+                                decomposed.append(w_clean)
+                        if len(decomposed) >= 2:
+                            candidates.extend(decomposed)
+                        else:
+                            candidates.append(rc_clean)
+
                 added_items = []
                 already_present_items = []
                 missing_items = []
@@ -849,46 +925,57 @@ class ConversationAgent:
 
                 # Branch A: No items added, but inquired item is already present in the active plan
                 if not added_items and already_present_items:
-                    ex_first = already_present_items[0]["existing"]
-                    ex_name = ex_first.get("name", "Item")
-                    ex_cat = ex_first.get("category", "Item")
-                    ex_price = ex_first.get("price_inr", 0)
+                    if len(already_present_items) == 1:
+                        ex_first = already_present_items[0]["existing"]
+                        ex_name = ex_first.get("name", "Item")
+                        ex_cat = ex_first.get("category", "Item")
+                        ex_price = ex_first.get("price_inr", 0)
 
-                    cand_first = already_present_items[0]["cand"].lower()
-                    is_light_inq = any(w in cand_first for w in ["light", "lamp", "lighting"]) or ("lamp" in ex_cat.lower() or "light" in ex_cat.lower())
+                        cand_first = already_present_items[0]["cand"].lower()
+                        is_light_inq = any(w in cand_first for w in ["light", "lamp", "lighting"]) or ("lamp" in ex_cat.lower() or "light" in ex_cat.lower())
 
-                    if is_light_inq:
-                        alt_lights = [
-                            r for r in tools.catalog_search(room_type=room_t, in_stock_only=True, db_path=self.db_path)
-                            if ("lamp" in r.get("category", "").lower() or "light" in r.get("category", "").lower())
-                            and r.get("item_id") != ex_first.get("item_id")
-                        ]
-                        alt_desc = ""
-                        if alt_lights:
-                            alt_names = [f"{a['name']} ({a['category']} at ₹{a['price_inr']:,})" for a in alt_lights[:2]]
-                            alt_desc = f"\n• **Swap options**: You can swap it with {', or '.join(alt_names)}."
+                        if is_light_inq:
+                            alt_lights = [
+                                r for r in tools.catalog_search(room_type=room_t, in_stock_only=True, db_path=self.db_path)
+                                if ("lamp" in r.get("category", "").lower() or "light" in r.get("category", "").lower())
+                                and r.get("item_id") != ex_first.get("item_id")
+                            ]
+                            alt_desc = ""
+                            if alt_lights:
+                                alt_names = [f"{a['name']} ({a['category']} at ₹{a['price_inr']:,})" for a in alt_lights[:2]]
+                                alt_desc = f"\n• **Swap options**: You can swap it with {', or '.join(alt_names)}."
 
-                        response_text = (
-                            f"💡 Your design plan already includes the **{ex_name} ({ex_cat})** priced at ₹{ex_price:,}!\n\n"
-                            f"Here are your options for lighting in your {pref_style} {room_t}:\n"
-                            f"• **Current fixture**: It provides warm ambient lighting tailored for your room.{alt_desc}\n"
-                            f"• **Swap**: You can swap it for another fixture (e.g. *'swap floor lamp for table lamp'*).\n"
-                            f"• **Add extra**: If you would like an additional fixture in the room, simply reply *'add another lamp'* or *'add table lamp'*."
-                        )
-                        metadata["chips"] = ["Swap with Table Lamp", "Add another lamp", "Looks great!", "Make it cheaper"]
+                            response_text = (
+                                f"💡 Your design plan already includes the **{ex_name} ({ex_cat})** priced at ₹{ex_price:,}!\n\n"
+                                f"Here are your options for lighting in your {pref_style} {room_t}:\n"
+                                f"• **Current fixture**: It provides warm ambient lighting tailored for your room.{alt_desc}\n"
+                                f"• **Swap**: You can swap it for another fixture (e.g. *'swap floor lamp for table lamp'*).\n"
+                                f"• **Add extra**: If you would like an additional fixture in the room, simply reply *'add another lamp'* or *'add table lamp'*."
+                            )
+                            metadata["chips"] = ["Swap with Table Lamp", "Add another lamp", "Looks great!", "Make it cheaper"]
+                        else:
+                            emoji = "🌿" if any(w in ex_cat.lower() for w in ["planter", "plant"]) else ("🪟" if "curtain" in ex_cat.lower() else "🛋️")
+                            response_text = (
+                                f"{emoji} Your design plan already includes the **{ex_name} ({ex_cat})** priced at ₹{ex_price:,} that you requested!\n\n"
+                                f"Here are your options:\n"
+                                f"• **Keep it**: It is currently active in your 9-field itemized BOQ table below.\n"
+                                f"• **Swap**: To change model or style, ask *'swap {ex_cat} for [item]'*.\n"
+                                f"• **Add another**: If you would like an extra one, ask *'add another {ex_cat}'*.\n"
+                                f"• **Remove**: To remove it, ask *'remove {ex_cat}'*."
+                            )
+                            metadata["chips"] = [f"Swap {ex_cat}", f"Add another {ex_cat}", "Looks great!", "Make it cheaper"]
                     else:
+                        # Multiple inquired items already present
+                        present_lines = [f"• **{p['existing']['category']}**: {p['existing']['name']} priced at ₹{p['existing']['price_inr']:,}" for p in already_present_items]
                         response_text = (
-                            f"Your design plan already includes the **{ex_name} ({ex_cat})** priced at ₹{ex_price:,}.\n\n"
-                            f"Here are your options:\n"
-                            f"• **Keep it**: It is currently active in your 9-field itemized BOQ table below.\n"
-                            f"• **Swap**: To change model or style, ask *'swap {ex_cat} for [item]'*.\n"
-                            f"• **Add another**: If you would like an extra one, ask *'add another {ex_cat}'*.\n"
-                            f"• **Remove**: To remove it, ask *'remove {ex_cat}'*."
+                            f"Your design plan already includes the items you requested:\n" + "\n".join(present_lines) +
+                            f"\n\nAll of these pieces are active in your 9-field itemized BOQ table below. You can swap any item, add more pieces, or adjust your budget anytime!"
                         )
-                        metadata["chips"] = [f"Swap {ex_cat}", f"Add another {ex_cat}", "Looks great!", "Make it cheaper"]
+                        metadata["chips"] = ["Looks great!", "Add an item", "Remove an item", "Make it cheaper"]
 
                     if missing_items:
-                        response_text += f"\n\n(Note: We don't have {', '.join(missing_items)} in our catalog for {room_t}.)"
+                        clean_miss = [re.sub(r"\b(?:i\s+mentioned\s+(?:before|earlier)|that\s+i\s+(?:mentioned|said)|from\s+before|before|earlier)\b", "", m, flags=re.I).strip() for m in missing_items]
+                        response_text += f"\n\n(Note: We don't have {', '.join(clean_miss)} in our catalog for {room_t}.)"
 
                     metadata["plan"] = plan
 
@@ -896,8 +983,16 @@ class ConversationAgent:
                 elif not added_items:
                     room_categories = self.catalog_agent.get_categories_for_room(room_t)
                     cats_preview = ", ".join(room_categories[:6])
+                    clean_display = re.sub(
+                        r"\b(?:i\s+mentioned\s+(?:before|earlier)|that\s+i\s+(?:mentioned|said|asked\s+for|talked\s+about)\s+(?:before|earlier)?|i\s+(?:said|told\s+you|asked\s+for|talked\s+about)\s+(?:before|earlier)|from\s+before|we\s+(?:talked\s+about|discussed)|as\s+i\s+said(?:\s+earlier)?|you\s+missed|you\s+ignored|which\s+i\s+said|previously|earlier|before)\b",
+                        "",
+                        clean_target,
+                        flags=re.IGNORECASE
+                    ).strip()
+                    if not clean_display:
+                        clean_display = clean_target
                     response_text = (
-                        f"We don't have '{clean_target}' in our catalog for {room_t}. "
+                        f"We don't have '{clean_display}' in our catalog for {room_t}. "
                         f"You can choose to add from our available categories for {room_t}: {cats_preview}, and more."
                     )
                     metadata["plan"] = plan
@@ -1124,7 +1219,7 @@ class ConversationAgent:
             "curtains", "curtain", "drapes", "sheers", "plants", "plant", "planter", "planters", "greenery",
             "floor lamp", "table lamp", "pendant light", "lighting", "lights", "light",
             "armchair", "arm chair", "accent chair", "bookshelf", "bookcase", "coffee table", "center table",
-            "tv unit", "tv console", "rug", "rugs", "side table", "console", "bean bag", "ottoman", "wardrobe"
+            "tv unit", "tv console", "carpet", "carpets", "rug", "rugs", "side table", "console", "bean bag", "ottoman", "wardrobe"
         ]
         for kw in scan_keywords:
             if re.search(r"\b" + re.escape(kw) + r"\b", combined_text):
@@ -1209,61 +1304,41 @@ class ConversationAgent:
 
     def _extract_add_target(self, text: str) -> Optional[str]:
         """Extracts addition target keyword from diverse user adding phrasings."""
-        # 1. Why didn't you add / why are you not adding X
-        m_why = re.search(
-            r"\b(?:why are you not adding|why aren't you adding|why arent you adding|why didn't you add|why didnt you add|why haven't you added|why havent you added|why not add|why you didn't add|why you didnt add)\s+(?:a\s+|an\s+|the\s+)?(.+)",
-            text,
-            re.I
-        )
-        if m_why:
-            return re.sub(r"[?.!,;]+$", "", m_why.group(1)).strip()
+        cleaned_in = text.strip()
 
-        # 2. What about X / How about X / What of X
-        m_what = re.search(
-            r"\b(?:what about|how about|what of)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
-            text,
-            re.I
+        # 1. Check if user inquiry or addition begins with a prefix (e.g. "what about", "why did you ignore", "add", "can we have")
+        prefix_pattern = (
+            r"^(?:why did you (?:ignore|omit|miss|forget|leave out)|did you (?:add|include|put in)|"
+            r"what happened to|what about the|what about|how about|what of|where (?:is|are) the|why no|why not|"
+            r"why are you not adding|why aren't you adding|why arent you adding|why didn't you add|why didnt you add|"
+            r"why haven't you added|why havent you added|why not add|why you didn't add|why you didnt add|"
+            r"can we have|can i have|can we get|can i get|could we have|could we get|do you have|do we have|"
+            r"is there|are there|have you got|where is|where are|"
+            r"i said add|i asked to add|i told to add|i want to add|can we add|could you add|please add|let's add|also add|"
+            r"add|adding|include|including|put in|insert|want|need|get)\s+(?:a\s+|an\s+|the\s+|some\s+)?"
         )
-        if m_what:
-            return re.sub(r"[?.!,;]+$", "", m_what.group(1)).strip()
+        m_prefix = re.search(prefix_pattern, cleaned_in, re.I)
+        core_target = re.sub(prefix_pattern, "", cleaned_in, flags=re.I).strip() if m_prefix else cleaned_in
 
-        # 3. Can we have X / can we get X / do you have X / do we have X / is there X / are there X / where is X / where are X
-        m_have = re.search(
-            r"\b(?:can we have|can i have|can we get|can i get|could we have|could we get|do you have|do we have|is there|are there|have you got|where is|where are|why no|why not)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
-            text,
-            re.I
+        # Strip trailing past-reference clauses from core_target
+        past_ref_pattern = (
+            r"\s+(?:i\s+mentioned\s+(?:before|earlier)|that\s+i\s+(?:mentioned|said|asked\s+for|talked\s+about)\s+(?:before|earlier)?|"
+            r"i\s+(?:said|told\s+you|asked\s+for|talked\s+about)\s+(?:before|earlier)|from\s+before|we\s+(?:talked\s+about|discussed)|"
+            r"as\s+i\s+said(?:\s+earlier)?|you\s+(?:missed|ignored|forgot)|which\s+i\s+said|previously|earlier|before)\b"
         )
-        if m_have:
-            return re.sub(r"[?.!,;]+$", "", m_have.group(1)).strip()
+        core_target = re.sub(past_ref_pattern, "", core_target, flags=re.I).strip()
+        core_target = re.sub(r"[?.!,;]+$", "", core_target).strip()
 
-        # 4. I said add X / i asked to add X / i told to add X
-        m_asked = re.search(
-            r"\b(?:i said|i asked to|i told to|i want to|i'd like to|can we|could you|please|let's|also)\s+(?:add|include|put in|insert)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
-            text,
-            re.I
-        )
-        if m_asked:
-            return re.sub(r"[?.!,;]+$", "", m_asked.group(1)).strip()
+        if m_prefix and core_target:
+            return core_target
 
-        # 5. Direct add / adding / include / put in / insert
-        m_add = re.search(
-            r"\b(?:add|adding|include|including|put in|insert)\b\s*(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
-            text,
-            re.I
-        )
-        if m_add:
-            return re.sub(r"[?.!,;]+$", "", m_add.group(1)).strip()
+        # 2. Check if message is a direct past reference (e.g. "plants i mentioned before")
+        m_past = re.search(r"^(.+?)" + past_ref_pattern, cleaned_in, re.I)
+        if m_past:
+            extracted = re.sub(r"^(?:a\s+|an\s+|the\s+|some\s+)?", "", m_past.group(1).strip(), flags=re.I).strip()
+            return re.sub(r"[?.!,;]+$", "", extracted).strip()
 
-        # 6. Want X / Need X
-        m_want = re.search(
-            r"\b(?:want|need|get)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
-            text,
-            re.I
-        )
-        if m_want:
-            return re.sub(r"[?.!,;]+$", "", m_want.group(1)).strip()
-
-        # 7. Direct list or mention of known catalog categories/items (e.g. "plants and curtains", "curtains, plants, lights")
+        # 3. Direct list or mention of known catalog categories/items (e.g. "plants and curtains", "curtains, plants, lights")
         clean_no_punct = re.sub(r"[?.!,;]+$", "", text).strip()
         tokens = [t.strip() for t in re.split(r",|\s+and\s+|\s+&\s+|\s+\+\s+", clean_no_punct, flags=re.I) if t.strip()]
         if tokens and len(tokens) <= 6:

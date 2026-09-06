@@ -210,8 +210,20 @@ class CatalogAgent:
             if key in lower:
                 brand_subs.append((label, sub_name))
 
-        raw_tokens = re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', user_text, flags=re.IGNORECASE)
+        has_commas = "," in user_text
+        if has_commas:
+            raw_tokens = [t.strip() for t in user_text.split(",") if t.strip()]
+        else:
+            raw_tokens = re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', user_text, flags=re.IGNORECASE)
+
         candidates = []
+        known_keywords = {
+            "curtains", "curtain", "drapes", "sheers", "plant", "plants", "planter", "planters", "greenery",
+            "carpet", "carpets", "rug", "rugs", "light", "lights", "lighting", "lamp", "lamps", "floor lamp",
+            "table lamp", "sofa", "couch", "coffee table", "center table", "tv unit", "tv console",
+            "armchair", "bookshelf", "wardrobe", "cushions", "ottoman"
+        }
+
         for t in raw_tokens:
             clean = re.sub(
                 r'^(i want|i need|please add|give me|we want|looking for|also|with|a|an|the)\s+',
@@ -219,6 +231,30 @@ class CatalogAgent:
                 t.strip(),
                 flags=re.IGNORECASE
             ).strip()
+            # Only decompose space-separated items if user did not provide a comma-separated list
+            if not has_commas:
+                words = clean.split()
+                if len(words) > 1 and sum(1 for w in words if w.lower().strip("?.!,") in known_keywords) >= 2:
+                    sub_list = []
+                    curr = []
+                    for w in words:
+                        w_lower = w.lower().strip("?.!,")
+                        if w_lower in known_keywords:
+                            if curr:
+                                sub_list.append(" ".join(curr))
+                                curr = []
+                            sub_list.append(w_lower)
+                        else:
+                            curr.append(w)
+                    if curr:
+                        sub_list.append(" ".join(curr))
+                    
+                    if len(sub_list) > 1:
+                        for s in sub_list:
+                            if len(s) >= 2 and s.lower() not in generic_tokens:
+                                candidates.append(s)
+                        continue
+
             if len(clean) >= 2 and clean.lower() not in generic_tokens:
                 candidates.append(clean)
 
@@ -350,6 +386,15 @@ class CatalogAgent:
             keyword.strip(),
             flags=re.IGNORECASE
         ).strip().lower()
+
+        # Strip conversational back-references (e.g. "plants i mentioned before", "curtains that i said earlier")
+        cleaned = re.sub(
+            r"\b(?:i\s+mentioned\s+(?:before|earlier)|that\s+i\s+(?:mentioned|said|asked\s+for|talked\s+about)\s+(?:before|earlier)?|i\s+(?:said|told\s+you|asked\s+for|talked\s+about)\s+(?:before|earlier)|from\s+before|we\s+(?:talked\s+about|discussed)|as\s+i\s+said(?:\s+earlier)?|you\s+missed|you\s+ignored|which\s+i\s+said|previously|earlier|before)\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE
+        ).strip()
+
         if not cleaned or len(cleaned) < 2:
             return None
 
@@ -398,6 +443,10 @@ class CatalogAgent:
             "greenery": "planter",
             "botanical": "planter",
             "botanicals": "planter",
+            "houseplant": "planter",
+            "houseplants": "planter",
+            "indoor plant": "planter",
+            "indoor plants": "planter",
             "pots": "planter",
             "pot": "planter",
             "curtain": "curtains",
