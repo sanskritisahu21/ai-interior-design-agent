@@ -154,8 +154,22 @@ class ConversationAgent:
 
         return None
 
+    def _is_pure_parameter(self, text: str) -> bool:
+        """Checks if text is a single direct parameter like 'Living Room', '200 290 310', '200000', 'Scandinavian'."""
+        clean = text.strip()
+        lower = clean.lower()
+        if lower in ["living room", "living", "bedroom", "master bedroom", "dining room", "dining", "study room", "study", "kids room", "kids"]:
+            return True
+        if re.match(r"^\d+\s*[\*xX\s,]\s*\d+(?:\s*[\*xX\s,]\s*\d+)?\s*(?:cm|ft|feet|meters|m)?$", clean, re.I):
+            return True
+        if re.match(r"^\d+$", clean):
+            return True
+        if lower in ["scandinavian", "contemporary", "mid-century", "bohemian", "industrial", "minimalist", "traditional", "coastal"]:
+            return True
+        return False
+
     def _is_question_or_conversational(self, text: str, stage: str = "") -> bool:
-        """Determines if the user's input is a conversational inquiry, design question, or complex query."""
+        """Determines if the user's input is a conversational inquiry, design question, hesitation, or advice request."""
         clean = text.strip()
 
         # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked a question
@@ -163,23 +177,40 @@ class ConversationAgent:
             if "?" not in clean:
                 return False
 
+        # In PLAN_GENERATED / PLAN_REVISION, let deterministic tools handle add/remove/swap/cheaper/reset commands
+        if stage in ["PLAN_GENERATED", "PLAN_REVISION"]:
+            if self._extract_add_target(clean) or self._extract_remove_target(clean):
+                return False
+            if any(w in lower for w in ["swap", "replace", "reduce", "cheaper", "start over", "restart", "looks great", "looks perfect", "confirm plan", "proceed"]):
+                return False
+
         if "?" in clean:
             # Exclude plan modification triggers like 'why are you not adding'
             if re.search(r"\bwhy (?:are|aren't|arent|didn't|didnt|not|haven't|havent)\b", clean.lower()):
                 return False
             return True
+
         lower = clean.lower()
-        question_words = [
-            "what", "why", "how", "can you", "could you", "tell me", "explain",
-            "suggest", "recommend", "which", "difference between", "advice",
-            "opinion", "ideas", "color", "palette", "material",
-            "confused", "meaning of", "help me choose", "what about", "is it possible"
+
+        # Conversational intents: questions, uncertainty, lack of choice, advice requests
+        conversational_intents = [
+            r"\b(?:no choice|any choice|don't have|dont have|have no choice|no preference|any preference)\b",
+            r"\b(?:don't know|dont know|not sure|no idea|confused|help me choose|you choose|you decide|you pick)\b",
+            r"\b(?:surprise me|whatever|anything is fine|your choice|your call|any style|any room|what looks good)\b",
+            r"\b(?:what|why|how|can you|could you|tell me|explain|suggest|recommend|which|difference between)\b",
+            r"\b(?:advice|opinion|ideas|color|palette|material|meaning of|what about|is it possible|guide me)\b"
         ]
-        if any(re.search(rf"\b{re.escape(w)}\b", lower) for w in question_words):
+        if any(re.search(p, lower) for p in conversational_intents):
             return True
-        # If user typed a natural conversational sentence (6+ words), but not a comma-separated must-haves list
-        if len(clean.split()) >= 6 and "," not in clean:
+
+        # Pure parameter bypass
+        if self._is_pure_parameter(clean):
+            return False
+
+        # If user typed any natural sentence with 4+ words that is not a pure parameter
+        if len(clean.split()) >= 4:
             return True
+
         return False
 
     def _handle_gemini_turn(
@@ -520,8 +551,16 @@ class ConversationAgent:
         # STAGE 5: STYLE
         # -------------------------------------------------------------
         elif stage == "STYLE":
-            confused_phrases = ["don't know", "dont know", "confused", "not sure", "no idea", "any style", "skip"]
+            confused_phrases = [
+                "don't know", "dont know", "confused", "not sure", "no idea", "any style",
+                "skip", "no choice", "don't have any choice", "dont have any choice",
+                "have no choice", "you choose", "you decide", "you pick", "surprise me", "whatever"
+            ]
             if any(p in lower_text for p in confused_phrases):
+                if self.gemini_service.is_configured():
+                    gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
+                    if gemini_res:
+                        return gemini_res
                 # Suggest styles from DB
                 suggested_styles = ["Scandinavian", "Mid-Century", "Contemporary", "Bohemian"]
                 response_text = (
@@ -545,6 +584,10 @@ class ConversationAgent:
                     metadata["chips"] = default_must_haves + ["All of these"]
                     metadata["stage"] = "MUST_HAVES"
                 else:
+                    if self.gemini_service.is_configured():
+                        gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
+                        if gemini_res:
+                            return gemini_res
                     # Style is NOT present in DB
                     clean_style = re.sub(r"\s+style\b", "", user_text, flags=re.IGNORECASE).strip().title()
                     alts_str = ", ".join(suggested_alts[:3])

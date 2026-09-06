@@ -182,6 +182,9 @@ class GeminiService:
    - If the customer provided information (e.g. room name, room size like '12x14 feet' or '4x3 meters', budget like '2 lakhs', style, or furniture preferences), acknowledge it warmly.
    - If the customer wants to modify an existing plan (e.g. 'remove coffee table', 'add armchair', 'make it cheaper'), address their request.
 2. Extract any newly provided design parameters from their message.
+   - IMPORTANT: Only set a parameter in 'extracted' if the customer actually provided or chose it.
+   - If the customer has no preference, says 'I don't have any choice', 'not sure', or if you are presenting options, keep 'style' as null so they can choose from your suggestions.
+   - If the customer explicitly says 'you choose', 'choose for me', or 'surprise me', pick a catalog style (e.g. 'Scandinavian') and set it in 'extracted'.
 3. Suggest 3 to 4 short, clickable quick-reply chips for the customer.
 
 Return your response in strictly valid JSON format with this schema:
