@@ -344,7 +344,12 @@ class CatalogAgent:
         Finds a catalog item matching the user's keyword for the given room type and preferred style.
         Returns the raw DB row as a dict, or None if not found.
         """
-        cleaned = re.sub(r"^(a|an|the|some|one|new)\s+", "", keyword.strip(), flags=re.IGNORECASE).strip().lower()
+        cleaned = re.sub(
+            r"^(?:what about|how about|what of|can we add|can we have|can you add|can i get|could we add|do you have|do we have|is there|are there|i want|i need|please add|give me|also|and|with|a|an|the|some|one|new)\s+",
+            "",
+            keyword.strip(),
+            flags=re.IGNORECASE
+        ).strip().lower()
         if not cleaned or len(cleaned) < 2:
             return None
 
@@ -390,11 +395,16 @@ class CatalogAgent:
             "plants": "planter",
             "planter": "planter",
             "planters": "planter",
+            "greenery": "planter",
+            "botanical": "planter",
+            "botanicals": "planter",
             "pots": "planter",
             "pot": "planter",
             "curtain": "curtains",
             "curtains": "curtains",
             "drapes": "curtains",
+            "sheers": "curtains",
+            "sheer curtains": "curtains",
             "rug": "rug",
             "rugs": "rug",
             "couch": "sofa",

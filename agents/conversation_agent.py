@@ -92,9 +92,10 @@ class ConversationAgent:
             if "?" not in clean and not any(h in lower for h in hesitation_tokens):
                 return False
 
-        # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked a question
+        # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked for general advice
         if stage == "MUST_HAVES" or ("," in clean and len(clean.split(",")) >= 2):
-            if "?" not in clean:
+            hesitation_tokens = ["don't know", "dont know", "not sure", "confused", "no idea", "what do people choose", "suggest must haves", "what do you recommend", "help me choose"]
+            if not any(h in lower for h in hesitation_tokens):
                 return False
 
         # In PLAN_GENERATED / PLAN_REVISION, let deterministic tools handle add/remove/swap/cheaper/reset commands
@@ -994,6 +995,18 @@ class ConversationAgent:
         if notes:
             user_musts.extend(re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', str(notes)))
 
+        # Also scan text for unpunctuated or space-separated items (e.g. "plants curtains", "sofa coffee table plants curtains lights")
+        combined_text = f"{raw_musts} {notes}".lower()
+        scan_keywords = [
+            "curtains", "curtain", "drapes", "sheers", "plants", "plant", "planter", "planters", "greenery",
+            "floor lamp", "table lamp", "pendant light", "lighting", "lights", "light",
+            "armchair", "arm chair", "accent chair", "bookshelf", "bookcase", "coffee table", "center table",
+            "tv unit", "tv console", "rug", "rugs", "side table", "console", "bean bag", "ottoman", "wardrobe"
+        ]
+        for kw in scan_keywords:
+            if re.search(r"\b" + re.escape(kw) + r"\b", combined_text):
+                user_musts.append(kw)
+
         boq = res.get("boq", [])
         existing_cats = {it.get("category", "").lower() for it in boq}
         existing_ids = {it.get("item_id") for it in boq}
@@ -1002,7 +1015,12 @@ class ConversationAgent:
         generic_skips = {"all", "everything", "standard", "any", "living room", "bedroom", "dining", "study", "yes", "yeah", "ok", "please", "room", "sofa", "furniture"}
 
         for req in user_musts:
-            clean_req = re.sub(r'^(?:i want|i need|please add|give me|we want|looking for|also|with|a|an|the|some)\s+', '', req.strip(), flags=re.I).strip()
+            clean_req = re.sub(
+                r'^(?:what about|how about|what of|can we have|can we add|can you add|can i get|could we add|do you have|do we have|is there|are there|i want|i need|please add|give me|we want|looking for|also|with|and|a|an|the|some)\s+',
+                '',
+                req.strip(),
+                flags=re.I
+            ).strip()
             if len(clean_req) < 3 or clean_req.lower() in generic_skips:
                 continue
 
@@ -1077,7 +1095,25 @@ class ConversationAgent:
         if m_why:
             return re.sub(r"[?.!,;]+$", "", m_why.group(1)).strip()
 
-        # 2. I said add X / i asked to add X / i told to add X
+        # 2. What about X / How about X / What of X
+        m_what = re.search(
+            r"\b(?:what about|how about|what of)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
+            text,
+            re.I
+        )
+        if m_what:
+            return re.sub(r"[?.!,;]+$", "", m_what.group(1)).strip()
+
+        # 3. Can we have X / can we get X / do you have X / do we have X / is there X / are there X
+        m_have = re.search(
+            r"\b(?:can we have|can i have|can we get|can i get|could we have|could we get|do you have|do we have|is there|are there|have you got)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
+            text,
+            re.I
+        )
+        if m_have:
+            return re.sub(r"[?.!,;]+$", "", m_have.group(1)).strip()
+
+        # 4. I said add X / i asked to add X / i told to add X
         m_asked = re.search(
             r"\b(?:i said|i asked to|i told to|i want to|i'd like to|can we|could you|please|let's|also)\s+(?:add|include|put in|insert)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
             text,
@@ -1086,7 +1122,7 @@ class ConversationAgent:
         if m_asked:
             return re.sub(r"[?.!,;]+$", "", m_asked.group(1)).strip()
 
-        # 3. Direct add / adding / include / put in / insert
+        # 5. Direct add / adding / include / put in / insert
         m_add = re.search(
             r"\b(?:add|adding|include|including|put in|insert)\b\s*(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
             text,
@@ -1095,7 +1131,7 @@ class ConversationAgent:
         if m_add:
             return re.sub(r"[?.!,;]+$", "", m_add.group(1)).strip()
 
-        # 4. Want X / Need X
+        # 6. Want X / Need X
         m_want = re.search(
             r"\b(?:want|need|get)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
             text,
@@ -1103,6 +1139,27 @@ class ConversationAgent:
         )
         if m_want:
             return re.sub(r"[?.!,;]+$", "", m_want.group(1)).strip()
+
+        # 7. Direct list or mention of known catalog categories/items (e.g. "plants and curtains", "curtains, plants, lights")
+        clean_no_punct = re.sub(r"[?.!,;]+$", "", text).strip()
+        tokens = [t.strip() for t in re.split(r",|\s+and\s+|\s+&\s+|\s+\+\s+", clean_no_punct, flags=re.I) if t.strip()]
+        if tokens and len(tokens) <= 6:
+            known_terms = {
+                "curtain", "curtains", "drapes", "sheers", "plant", "plants", "planter", "planters", "greenery",
+                "light", "lights", "lighting", "lamp", "lamps", "floor lamp", "table lamp", "pendant light",
+                "armchair", "arm chair", "chair", "chairs", "accent chair", "bookshelf", "bookcase",
+                "coffee table", "center table", "tea table", "side table", "end table", "console",
+                "bean bag", "ottoman", "pouf", "rug", "carpet", "rugs", "cushion", "cushions", "pillows",
+                "wall art", "art", "painting", "mirror", "sofa", "couch", "tv unit", "tv console",
+                "wardrobe", "closet", "bed", "mattress", "bedside table", "desk", "office chair", "dining table", "dining chair"
+            }
+            matched_count = 0
+            for tok in tokens:
+                sub_tok = re.sub(r"^(?:a|an|the|some)\s+", "", tok.lower()).strip()
+                if sub_tok in known_terms or any(kt in sub_tok for kt in known_terms):
+                    matched_count += 1
+            if matched_count > 0 and matched_count >= len(tokens) / 2:
+                return clean_no_punct
 
         return None
 
