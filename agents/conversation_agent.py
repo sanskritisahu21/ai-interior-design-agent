@@ -171,6 +171,11 @@ class ConversationAgent:
     def _is_question_or_conversational(self, text: str, stage: str = "") -> bool:
         """Determines if the user's input is a conversational inquiry, design question, hesitation, or advice request."""
         clean = text.strip()
+        lower = clean.lower()
+
+        # Pure parameter bypass: raw numbers, direct DB styles, direct room clicks, or comma-separated item lists
+        if self._is_pure_parameter(clean):
+            return False
 
         # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked a question
         if stage == "MUST_HAVES" or ("," in clean and len(clean.split(",")) >= 2):
@@ -184,34 +189,12 @@ class ConversationAgent:
             if any(w in lower for w in ["swap", "replace", "reduce", "cheaper", "start over", "restart", "looks great", "looks perfect", "confirm plan", "proceed"]):
                 return False
 
-        if "?" in clean:
-            # Exclude plan modification triggers like 'why are you not adding'
-            if re.search(r"\bwhy (?:are|aren't|arent|didn't|didnt|not|haven't|havent)\b", clean.lower()):
-                return False
-            return True
-
-        lower = clean.lower()
-
-        # Conversational intents: questions, uncertainty, lack of choice, advice requests
-        conversational_intents = [
-            r"\b(?:no choice|any choice|don't have|dont have|have no choice|no preference|any preference)\b",
-            r"\b(?:don't know|dont know|not sure|no idea|confused|help me choose|you choose|you decide|you pick)\b",
-            r"\b(?:surprise me|whatever|anything is fine|your choice|your call|any style|any room|what looks good)\b",
-            r"\b(?:what|why|how|can you|could you|tell me|explain|suggest|recommend|which|difference between)\b",
-            r"\b(?:advice|opinion|ideas|color|palette|material|meaning of|what about|is it possible|guide me)\b"
-        ]
-        if any(re.search(p, lower) for p in conversational_intents):
-            return True
-
-        # Pure parameter bypass
-        if self._is_pure_parameter(clean):
+        # If user message is just a standalone greeting ("hi", "hello") at GREETING stage, let standard opening flow handle it
+        if stage == "GREETING" and any(re.match(p, lower) for p in [r"^(hi|hii|hiii|hello|hey|greetings|namaste)$"]):
             return False
 
-        # If user typed any natural sentence with 4+ words that is not a pure parameter
-        if len(clean.split()) >= 4:
-            return True
-
-        return False
+        # Any other message (questions, "hotel", "hotel room", "Yeah", "yes", "i don't have any choice", "you choose", "surprise me", "minimal", etc.) is conversational!
+        return True
 
     def _handle_gemini_turn(
         self,
@@ -556,7 +539,21 @@ class ConversationAgent:
                 "skip", "no choice", "don't have any choice", "dont have any choice",
                 "have no choice", "you choose", "you decide", "you pick", "surprise me", "whatever"
             ]
-            if any(p in lower_text for p in confused_phrases):
+            affirmative_phrases = ["yeah", "yes", "sure", "ok", "okay", "yup", "yep", "go ahead", "sounds good", "let's do it", "lets do it", "that works", "perfect"]
+            if lower_text in affirmative_phrases:
+                # User affirmed default recommendation (e.g. Scandinavian)
+                matched_style = "Scandinavian"
+                db.update_session(session_id, db_path=self.db_path, style=matched_style, stage="MUST_HAVES")
+                room_t = session.get("room_type", "Living Room")
+                default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
+                response_text = (
+                    f"Awesome! We will style your {room_t} with a timeless {matched_style} aesthetic. "
+                    f"What are your must-haves in your {room_t}? "
+                    f"For this room, customers typically choose: {', '.join(default_must_haves)}."
+                )
+                metadata["chips"] = default_must_haves + ["All of these"]
+                metadata["stage"] = "MUST_HAVES"
+            elif any(p in lower_text for p in confused_phrases):
                 if self.gemini_service.is_configured():
                     gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
                     if gemini_res:
@@ -976,6 +973,10 @@ class ConversationAgent:
             "drawing": "Living Room",
             "bed": "Bedroom",
             "master": "Bedroom",
+            "guest": "Bedroom",
+            "hotel": "Bedroom",
+            "suite": "Bedroom",
+            "resort": "Bedroom",
             "dining": "Dining",
             "study": "Study",
             "office": "Study",
