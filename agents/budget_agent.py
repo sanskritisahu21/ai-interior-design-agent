@@ -50,7 +50,9 @@ class BudgetAgent:
         # Check for skip / don't know / confused
         skip_phrases = [
             "don't know", "dont know", "confused", "no budget", "i don't have a budget",
-            "i dont have a budget", "not sure", "skip", "no idea", "any budget"
+            "i dont have a budget", "not sure", "skip", "no idea", "any budget",
+            "don't have any", "dont have any", "no limit", "flexible", "whatever it costs",
+            "you decide", "any", "no strict budget", "standard budget", "average"
         ]
         if any(p in cleaned for p in skip_phrases):
             return {

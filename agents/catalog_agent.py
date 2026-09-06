@@ -191,8 +191,13 @@ class CatalogAgent:
         """
         lower = user_text.strip().lower()
 
-        generic_tokens = ["all", "all of these", "everything", "standard", "any", "don't know", "dont know", "confused"]
-        if any(lower == g or lower.startswith(g + " ") for g in generic_tokens):
+        generic_tokens = [
+            "all", "all of these", "everything", "standard", "standard items", "any", "don't know", "dont know",
+            "confused", "skip", "none", "no must-haves", "no must haves", "nothing", "nothing specific",
+            "no preference", "you decide", "you choose", "whatever", "surprise me", "choose any style",
+            "whichever affordable", "affordable", "cheap", "budget friendly", "whatever you suggest"
+        ]
+        if any(lower == g or lower.startswith(g + " ") for g in generic_tokens) or lower in ["skip", "none"]:
             avail_cats = []
             for item in boq_items:
                 c = item.get("category")
@@ -301,7 +306,9 @@ class CatalogAgent:
 
         unavailable = []
         for cand in candidates:
-            cand_low = cand.lower()
+            cand_low = cand.lower().strip("?.!,")
+            if any(cand_low == g or cand_low.startswith(g + " ") for g in generic_tokens):
+                continue
             mapped = synonyms.get(cand_low, cand_low)
             matched = False
             for cat in boq_cats:

@@ -208,6 +208,17 @@ class ConversationAgent:
             db.update_session(session_id, db_path=self.db_path, **new_updates)
             session = db.get_or_create_session(session_id, db_path=self.db_path)
 
+        # Ensure mandatory stage reminders if user has not provided required parameters
+        if current_stage in ["GREETING", "ROOM_TYPE"] and not detected_room and not session.get("room_type"):
+            if "cannot design" not in reply_text.lower() and "can't design" not in reply_text.lower():
+                reply_text += "\n\n(Please note: We cannot design an interior plan without knowing your room type. Please specify Living Room, Bedroom, Dining Room, Study, or Kids Room.)"
+            chips = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
+
+        if current_stage == "DIMENSIONS" and not (extracted.get("length_cm") and extracted.get("width_cm")) and not (session.get("length_cm") and session.get("width_cm")):
+            if "essential" not in reply_text.lower() and "dimensions" not in reply_text.lower():
+                reply_text += "\n\n(Room dimensions are essential so our furniture layout fits comfortably without overcrowding. We cannot design an interior plan without knowing your room size.)"
+            chips = ["12 * 10 feet", "15 * 12 feet", "400 * 350 cm"]
+
         metadata: Dict[str, Any] = {
             "chips": chips or ["Living Room", "Bedroom", "Dining", "Study"],
             "cards": [],
@@ -225,7 +236,7 @@ class ConversationAgent:
             session.get("width_cm") and 
             session.get("style") and 
             not current_plan and
-            current_stage in ["MUST_HAVES", "STYLE"]
+            current_stage == "MUST_HAVES"
         ):
             current_plan = self._synthesize_plan(session_id)
             db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(current_plan), stage="PLAN_REVISION")
@@ -234,6 +245,13 @@ class ConversationAgent:
 
             # Format standardized deterministic BOQ response rather than Gemini freeform essay
             coverage = self.catalog_agent.check_must_haves_coverage(user_text, current_plan.get("boq", []), room_type=room_t)
+            # Filter generic / non-item tokens from coverage
+            skip_phrases = ["skip", "none", "no must-haves", "no must haves", "nothing specific", "no preference", "choose any style", "whichever affordable", "affordable", "surprise me"]
+            if coverage.get("unavailable_items"):
+                clean_unavail = [u for u in coverage["unavailable_items"] if u.lower().strip("?.!,") not in skip_phrases]
+                coverage["unavailable_items"] = clean_unavail
+                coverage["has_unavailable"] = len(clean_unavail) > 0
+
             if coverage["has_unavailable"]:
                 unavail_str = ", ".join(coverage["unavailable_items"])
                 avail_str = ", ".join(coverage["available_items"])
@@ -365,27 +383,23 @@ class ConversationAgent:
         # STAGE 2: ROOM TYPE
         # -------------------------------------------------------------
         elif stage == "ROOM_TYPE":
-            confused_phrases = ["don't know", "dont know", "confused", "not sure", "no idea", "any room"]
-            if any(p in lower_text for p in confused_phrases):
-                response_text = "Sorry, I can't design without room type. Please let me know if you want to design a Living Room, Bedroom, Dining, Study, or Kids Room."
-                metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
+            confused_phrases = [
+                "don't know", "dont know", "confused", "not sure", "no idea", "any room",
+                "skip", "whatever", "you decide", "make a plan", "just make a plan", "just design"
+            ]
+            room_found = self._detect_room_type(lower_text)
+            if room_found:
+                db.update_session(session_id, db_path=self.db_path, room_type=room_found, stage="DIMENSIONS")
+                response_text = (
+                    f"Great! Let's work on your {room_found}. "
+                    "What is length * breadth * height of your room? (Feel free to reply in feet, meters, or cm)."
+                )
+                metadata["chips"] = ["14 * 12 feet", "4.5 * 3.8 meters", "400 * 350 * 280 cm", "I don't know"]
+                metadata["stage"] = "DIMENSIONS"
             else:
-                room_found = self._detect_room_type(lower_text)
-                if room_found:
-                    db.update_session(session_id, db_path=self.db_path, room_type=room_found, stage="DIMENSIONS")
-                    response_text = (
-                        f"Great! Let's work on your {room_found}. "
-                        "What is length * breadth * height of your room? (Feel free to reply in feet, meters, or cm)."
-                    )
-                    metadata["chips"] = ["14 * 12 feet", "4.5 * 3.8 meters", "400 * 350 * 280 cm", "I don't know"]
-                    metadata["stage"] = "DIMENSIONS"
-                else:
-                    if self.gemini_service.is_configured():
-                        gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
-                        if gemini_res:
-                            return gemini_res
-                    response_text = "Sorry, I can't design without room type. Please specify whether it is a Living Room, Bedroom, Dining, Study, or Kids Room."
-                    metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
+                response_text = "We cannot design an interior plan without knowing the room type. Please specify whether you are designing a Living Room, Bedroom, Dining Room, Study, or Kids Room."
+                metadata["chips"] = ["Living Room", "Bedroom", "Dining", "Study", "Kids Room"]
+                metadata["stage"] = "ROOM_TYPE"
 
         # -------------------------------------------------------------
         # STAGE 3: DIMENSIONS (L * B * H)
@@ -399,12 +413,14 @@ class ConversationAgent:
             )
 
             if dim_res["is_confused"]:
-                if self.gemini_service.is_configured():
-                    gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
-                    if gemini_res:
-                        return gemini_res
-                response_text = "Sorry, we need length, breadth, and height; we can't make an interior design plan without it. Even an estimate (like 12 * 10 feet) will help us get started!"
-                metadata["chips"] = ["12 * 10 feet", "15 * 12 feet", "4.5 * 3.5 meters"]
+                response_text = (
+                    "Room dimensions are essential so our furniture layout fits comfortably without overcrowding. "
+                    "We cannot design a functional interior plan without knowing your room size. "
+                    "Please provide length * breadth * height (e.g. 12 * 10 feet, 4.5 * 3.5 meters, or 400 * 350 cm). "
+                    "Even an approximate estimate will help us get started!"
+                )
+                metadata["chips"] = ["12 * 10 feet", "15 * 12 feet", "400 * 350 cm"]
+                metadata["stage"] = "DIMENSIONS"
             elif dim_res["is_complete"]:
                 l_cm = dim_res["length_cm"]
                 w_cm = dim_res["width_cm"]
@@ -460,12 +476,24 @@ class ConversationAgent:
         # -------------------------------------------------------------
         elif stage == "BUDGET":
             b_res = self.budget_agent.parse_budget_input(user_text)
+            budget_val = b_res.get("budget_target")
+            room_t = session.get("room_type") or "Living Room"
+
+            if not budget_val:
+                # Default baseline budget when skipped
+                if room_t == "Living Room":
+                    budget_val = 200000
+                elif room_t == "Bedroom":
+                    budget_val = 150000
+                else:
+                    budget_val = 120000
+
             db.update_session(
                 session_id,
                 db_path=self.db_path,
-                budget_raw=user_text,
+                budget_raw="Skipped (Flexible)" if b_res.get("is_skipped") else user_text,
                 budget_min=b_res.get("budget_min"),
-                budget_max=b_res.get("budget_target") or 250000,
+                budget_max=budget_val,
                 stage="STYLE"
             )
 
@@ -473,19 +501,18 @@ class ConversationAgent:
             suggested_styles = ["Scandinavian", "Mid-Century", "Contemporary", "Bohemian"]
             styles_str = ", ".join(suggested_styles)
 
-            if b_res["is_skipped"]:
+            if b_res.get("is_skipped"):
                 response_text = (
                     "No problem! We can proceed without a strict budget cap and select balanced, high-value pieces. "
-                    f"What style do you prefer? We have great styles like {styles_str}."
+                    f"What style do you prefer? For example, we offer {styles_str}."
                 )
             else:
-                budget_val = b_res.get("budget_target") or 250000
                 response_text = (
                     f"Noted! Budget allocation set to approx ₹{budget_val:,}. "
                     f"What style do you prefer? For example, we offer {styles_str}."
                 )
 
-            metadata["chips"] = suggested_styles + ["I am confused"]
+            metadata["chips"] = suggested_styles + ["Choose affordable style", "I am confused"]
             metadata["stage"] = "STYLE"
 
         # -------------------------------------------------------------
@@ -495,34 +522,54 @@ class ConversationAgent:
             confused_phrases = [
                 "don't know", "dont know", "confused", "not sure", "no idea", "any style",
                 "skip", "no choice", "don't have any choice", "dont have any choice",
-                "have no choice", "you choose", "you decide", "you pick", "surprise me", "whatever"
+                "have no choice", "you choose", "you decide", "you pick", "surprise me", "whatever", "choose any style"
             ]
+            affordable_phrases = [
+                "affordable", "cheapest", "cheap", "budget friendly", "budget-friendly",
+                "cost effective", "cost-effective", "low cost", "low-cost", "economical"
+            ]
+            room_t = session.get("room_type") or "Living Room"
+            length_cm = session.get("length_cm") or 400
+            width_cm = session.get("width_cm") or 350
+            area_sqm = round((length_cm * width_cm) / 10000.0, 1)
+
+            wants_affordable = any(w in lower_text for w in affordable_phrases)
+            wants_auto_style = any(p in lower_text for p in confused_phrases) or "whichever" in lower_text or "any" in lower_text or wants_affordable
             affirmative_phrases = ["yeah", "yes", "sure", "ok", "okay", "yup", "yep", "go ahead", "sounds good", "let's do it", "lets do it", "that works", "perfect"]
-            if lower_text in affirmative_phrases:
+
+            if wants_auto_style:
+                # Select appropriate style
+                if wants_affordable or area_sqm < 12.0:
+                    matched_style = "Minimalist"
+                    reason = "offers clean, space-conscious profiles that minimize fabrication costs while maximizing open floor space"
+                else:
+                    matched_style = "Scandinavian"
+                    reason = "features warm natural woods, functional ergonomics, and timeless versatile appeal"
+
+                db.update_session(session_id, db_path=self.db_path, style=matched_style, stage="MUST_HAVES")
+                default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
+                response_text = (
+                    f"Based on your {room_t} dimensions ({length_cm} x {width_cm} cm) and preference, "
+                    f"I have selected our **{matched_style}** style for you—it {reason}.\n\n"
+                    f"What are your essential must-have items for this {room_t}? "
+                    f"Clients commonly select: {', '.join(default_must_haves)}.\n"
+                    f"(You can specify custom items, or reply 'skip' to use our standard curated essentials.)"
+                )
+                metadata["chips"] = default_must_haves + ["All of these", "Skip must-haves"]
+                metadata["stage"] = "MUST_HAVES"
+            elif lower_text in affirmative_phrases:
                 # User affirmed default recommendation (e.g. Scandinavian)
                 matched_style = "Scandinavian"
                 db.update_session(session_id, db_path=self.db_path, style=matched_style, stage="MUST_HAVES")
-                room_t = session.get("room_type", "Living Room")
                 default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
                 response_text = (
                     f"Understood. We will design your {room_t} with a refined {matched_style} aesthetic. "
                     f"What are your essential must-have items for this {room_t}? "
-                    f"Clients commonly select: {', '.join(default_must_haves)}."
+                    f"Clients commonly select: {', '.join(default_must_haves)}.\n"
+                    f"(You can specify custom items, or reply 'skip' to use our standard curated essentials.)"
                 )
-                metadata["chips"] = default_must_haves + ["All of these"]
+                metadata["chips"] = default_must_haves + ["All of these", "Skip must-haves"]
                 metadata["stage"] = "MUST_HAVES"
-            elif any(p in lower_text for p in confused_phrases):
-                if self.gemini_service.is_configured():
-                    gemini_res = self._handle_gemini_turn(session_id, cleaned_text, session, stage)
-                    if gemini_res:
-                        return gemini_res
-                # Suggest styles from DB
-                suggested_styles = ["Scandinavian", "Mid-Century", "Contemporary", "Bohemian"]
-                response_text = (
-                    f"Certainly. Here are our featured interior styles from the catalog: {', '.join(suggested_styles)}. "
-                    "Which aesthetic do you prefer, or shall we proceed with a signature Scandinavian design?"
-                )
-                metadata["chips"] = suggested_styles
             else:
                 is_valid, matched_style, suggested_alts = self.catalog_agent.validate_style(user_text)
 
@@ -534,9 +581,10 @@ class ConversationAgent:
                     response_text = (
                         f"A {matched_style} aesthetic is an excellent choice for your {room_t}. "
                         f"What are your essential must-haves for this room? "
-                        f"Clients commonly select: {', '.join(default_must_haves)}."
+                        f"Clients commonly select: {', '.join(default_must_haves)}.\n"
+                        f"(You can specify custom items, or reply 'skip' to use our standard curated essentials.)"
                     )
-                    metadata["chips"] = default_must_haves + ["All of these"]
+                    metadata["chips"] = default_must_haves + ["All of these", "Skip must-haves"]
                     metadata["stage"] = "MUST_HAVES"
                 else:
                     if self.gemini_service.is_configured():
@@ -558,6 +606,26 @@ class ConversationAgent:
             room_t = session.get("room_type", "Living Room")
             default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
 
+            # Check if user skips must-haves
+            skip_tokens = [
+                "skip", "none", "no must-haves", "no must haves", "nothing specific", "no preference",
+                "you decide", "you choose", "whatever you suggest", "standard items", "standard", "all", "all of these", "whatever"
+            ]
+            is_skipped = any(p == lower_text or lower_text.startswith(p + " ") for p in skip_tokens) or lower_text in ["skip", "none"]
+
+            # Parse negative constraints (e.g. "no tv", "don't add coffee table", "without rug")
+            neg_patterns = [
+                r"\b(?:no|without|dont add|don't add|avoid|exclude|leave out|remove)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)",
+                r"\b([a-z0-9\s\-]+?)\s+(?:is\s+)?not\s+needed\b"
+            ]
+            negative_mentions = set()
+            for pat in neg_patterns:
+                for match in re.finditer(pat, lower_text):
+                    m_phrase = match.group(1).strip()
+                    m_phrase = re.split(r"[,;]|\band\b|\bwith\b|\bprefer\b", m_phrase)[0].strip()
+                    if m_phrase:
+                        negative_mentions.add(m_phrase.lower())
+
             # Check if user asked for external/unlisted item
             has_avail, unlisted_item, rec_item = self.catalog_agent.check_must_have_availability(user_text)
 
@@ -569,40 +637,43 @@ class ConversationAgent:
                     f"However, we have recommended {sub_name} as a stylish in-catalog substitute!\n\n"
                 )
 
-            # Save must-haves to session
-            raw_must_tokens = re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', user_text, flags=re.IGNORECASE)
-            extracted_items = []
-            known_words = {
-                "curtains", "curtain", "drapes", "sheers", "plants", "plant", "planter", "planters", "greenery",
-                "carpet", "carpets", "rug", "rugs", "lights", "light", "lighting", "lamp", "lamps",
-                "sofa", "couch", "coffee table", "center table", "tv", "tv unit", "tv console",
-                "armchair", "chair", "bookshelf", "wardrobe", "cushions", "ottoman"
-            }
-            for tok in raw_must_tokens:
-                c = re.sub(r'^(?:with|i want|i need|please add|give me|also|and|a|an|the)\s+', '', tok.strip(), flags=re.I).strip()
-                words = c.split()
-                if len(words) > 1 and any(w.lower() in known_words for w in words):
-                    sub_list = []
-                    curr = []
-                    for w in words:
-                        if w.lower() in known_words:
-                            if curr:
-                                sub_list.append(" ".join(curr))
-                                curr = []
-                            sub_list.append(w)
-                        else:
-                            curr.append(w)
-                    if curr:
-                        sub_list.append(" ".join(curr))
-                    for s in sub_list:
-                        if len(s) >= 2:
-                            extracted_items.append(s.strip())
-                elif len(c) >= 2:
-                    extracted_items.append(c)
-
-            must_haves_list = extracted_items if extracted_items else [m.strip() for m in user_text.split(",") if m.strip()]
-            if not must_haves_list or "all" in lower_text:
+            if is_skipped and not negative_mentions:
                 must_haves_list = default_must_haves
+            else:
+                raw_must_tokens = re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', user_text, flags=re.IGNORECASE)
+                extracted_items = []
+                known_words = {
+                    "curtains", "curtain", "drapes", "sheers", "plants", "plant", "planter", "planters", "greenery",
+                    "carpet", "carpets", "rug", "rugs", "lights", "light", "lighting", "lamp", "lamps",
+                    "sofa", "couch", "coffee table", "center table", "tv", "tv unit", "tv console",
+                    "armchair", "chair", "bookshelf", "wardrobe", "cushions", "ottoman", "bed", "bedside table"
+                }
+                for tok in raw_must_tokens:
+                    c = re.sub(r'^(?:with|i want|i need|please add|give me|also|and|a|an|the)\s+', '', tok.strip(), flags=re.I).strip()
+                    # Skip if this token is a negative constraint
+                    if any(c.lower().startswith(p) for p in ["no ", "without ", "dont add ", "don't add ", "avoid ", "exclude "]):
+                        continue
+                    words = c.split()
+                    if len(words) > 1 and any(w.lower() in known_words for w in words):
+                        sub_list = []
+                        curr = []
+                        for w in words:
+                            if w.lower() in known_words:
+                                if curr:
+                                    sub_list.append(" ".join(curr))
+                                    curr = []
+                                sub_list.append(w)
+                            else:
+                                curr.append(w)
+                        if curr:
+                            sub_list.append(" ".join(curr))
+                        for s in sub_list:
+                            if len(s) >= 2 and s.lower() not in skip_tokens:
+                                extracted_items.append(s.strip())
+                    elif len(c) >= 2 and c.lower() not in skip_tokens:
+                        extracted_items.append(c)
+
+                must_haves_list = extracted_items if extracted_items else default_must_haves
 
             db.update_session(
                 session_id,
@@ -620,8 +691,24 @@ class ConversationAgent:
             recs = plan_result.get("recommendations", {})
             boq = plan_result.get("boq", [])
 
-            # Check coverage of requested must-haves vs catalog & plan
-            coverage = self.catalog_agent.check_must_haves_coverage(user_text, boq, room_type=room_t)
+            if is_skipped and not negative_mentions:
+                coverage = {
+                    "has_unavailable": False,
+                    "unavailable_items": [],
+                    "available_items": [it.get("category") for it in boq],
+                    "brand_substitutions": []
+                }
+            else:
+                coverage = self.catalog_agent.check_must_haves_coverage(user_text, boq, room_type=room_t)
+
+            # Clean out any accidental skip tokens from coverage
+            if coverage.get("unavailable_items"):
+                clean_unavail = [
+                    u for u in coverage["unavailable_items"]
+                    if u.lower().strip("?.!,") not in skip_tokens
+                ]
+                coverage["unavailable_items"] = clean_unavail
+                coverage["has_unavailable"] = len(clean_unavail) > 0
 
             if coverage["has_unavailable"]:
                 unavail_str = ", ".join(coverage["unavailable_items"])
@@ -1197,6 +1284,39 @@ class ConversationAgent:
             if fallback_res.get("boq"):
                 res = fallback_res
 
+        # Check for negative constraints in raw_musts and notes (e.g. "no tv", "don't add coffee table", "without rug")
+        raw_musts = session.get("must_haves") or ""
+        combined_text = f"{raw_musts} {notes}".lower()
+        neg_patterns = [
+            r"\b(?:no|without|dont add|don't add|avoid|exclude|leave out|remove)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)",
+            r"\b([a-z0-9\s\-]+?)\s+(?:is\s+)?not\s+needed\b"
+        ]
+        category_synonyms = {
+            "tv": "tv unit", "tv unit": "tv unit", "tv console": "tv unit", "television": "tv unit",
+            "coffee table": "coffee table", "center table": "coffee table",
+            "rug": "rug", "rugs": "rug", "carpet": "rug", "carpets": "rug",
+            "floor lamp": "floor lamp", "standing lamp": "floor lamp", "reading lamp": "table lamp", "table lamp": "table lamp",
+            "lamp": "floor lamp", "lamps": "floor lamp", "light": "floor lamp", "lights": "floor lamp", "lighting": "floor lamp",
+            "curtain": "curtains", "curtains": "curtains", "drapes": "curtains",
+            "plant": "planter", "plants": "planter", "planter": "planter",
+            "wardrobe": "wardrobe", "cupboard": "wardrobe", "almirah": "wardrobe",
+            "armchair": "armchair", "arm chair": "armchair", "accent chair": "armchair", "chair": "armchair",
+            "bookshelf": "bookshelf", "book shelf": "bookshelf", "bookcase": "bookshelf"
+        }
+        excluded_cats = set()
+        for pat in neg_patterns:
+            for match in re.finditer(pat, combined_text):
+                phrase = match.group(1).strip()
+                phrase = re.split(r"[,;]|\band\b|\bwith\b|\bprefer\b", phrase)[0].strip()
+                norm_p = phrase.lower()
+                for k, v in category_synonyms.items():
+                    if k in norm_p:
+                        excluded_cats.add(v)
+
+        # Filter initial BOQ to exclude forbidden categories
+        if excluded_cats:
+            res["boq"] = [it for it in res.get("boq", []) if (it.get("category") or "").lower() not in excluded_cats]
+
         # Ensure any explicitly requested must-haves present in catalog are included in the plan
         user_musts = []
         raw_musts = session.get("must_haves") or ""
@@ -1214,7 +1334,6 @@ class ConversationAgent:
             user_musts.extend(re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', str(notes)))
 
         # Also scan text for unpunctuated or space-separated items (e.g. "plants curtains", "sofa coffee table plants curtains lights")
-        combined_text = f"{raw_musts} {notes}".lower()
         scan_keywords = [
             "curtains", "curtain", "drapes", "sheers", "plants", "plant", "planter", "planters", "greenery",
             "floor lamp", "table lamp", "pendant light", "lighting", "lights", "light",
@@ -1223,14 +1342,21 @@ class ConversationAgent:
         ]
         for kw in scan_keywords:
             if re.search(r"\b" + re.escape(kw) + r"\b", combined_text):
-                user_musts.append(kw)
+                kw_cat = category_synonyms.get(kw, kw)
+                if kw_cat not in excluded_cats:
+                    user_musts.append(kw)
 
         boq = res.get("boq", [])
         existing_cats = {it.get("category", "").lower() for it in boq}
         existing_ids = {it.get("item_id") for it in boq}
         added_any = False
 
-        generic_skips = {"all", "everything", "standard", "any", "living room", "bedroom", "dining", "study", "yes", "yeah", "ok", "please", "room", "sofa", "furniture"}
+        generic_skips = {
+            "all", "all of these", "everything", "standard", "standard items", "any", "living room",
+            "bedroom", "dining", "study", "yes", "yeah", "ok", "please", "room", "sofa", "furniture",
+            "skip", "none", "no must-haves", "no must haves", "nothing specific", "no preference",
+            "choose any style", "whichever affordable", "affordable", "surprise me"
+        }
 
         for req in user_musts:
             clean_req = re.sub(
@@ -1246,6 +1372,8 @@ class ConversationAgent:
             cat_found = self.catalog_agent.find_catalog_item_for_room(clean_req, room_type=room_type, style=style)
             if cat_found:
                 c_cat = (cat_found.get("category") or "").lower()
+                if c_cat in excluded_cats:
+                    continue
                 c_id = cat_found.get("item_id")
                 if c_id not in existing_ids and c_cat not in existing_cats:
                     boq.append(self._create_boq_row(cat_found, preferred_style=style))
@@ -1253,9 +1381,23 @@ class ConversationAgent:
                     existing_ids.add(c_id)
                     added_any = True
 
-        if added_any:
+        if added_any or excluded_cats:
             res["boq"] = boq
             res = self._recalculate_plan_metrics(res, length_cm, width_cm, budget, style, room_type=room_type)
+
+        if not res.get("recommendations"):
+            res["recommendations"] = {}
+
+        if excluded_cats:
+            excl_display = ", ".join(c.title() for c in sorted(list(excluded_cats)))
+            res["recommendations"]["item_recommendation"] = f"Excluded {excl_display} per your design constraint to keep the space open. " + (res["recommendations"].get("item_recommendation") or "")
+
+        if any(w in combined_text for w in ["yoga", "open space", "workout", "exercise", "walking"]):
+            free_sqm = res.get("free_area_sqm") or round((length_cm * width_cm * 0.45) / 10000.0, 1)
+            res["recommendations"]["item_recommendation"] = (res["recommendations"].get("item_recommendation") or "") + f" Floor plan prioritized for open central circulation ({free_sqm} sqm free area) matching your lifestyle note."
+
+        if any(w in combined_text for w in ["light wood", "teak", "oak", "warm lighting", "neutral", "cotton", "linen"]):
+            res["recommendations"]["color_recommendation"] = f"Curated warm neutral finishes featuring natural wood textures aligned with your material preferences."
 
         return res
 

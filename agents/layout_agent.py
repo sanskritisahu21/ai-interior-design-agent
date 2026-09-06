@@ -52,7 +52,10 @@ class LayoutAgent:
         cleaned = text.strip().lower()
 
         # Check for confused / refusal keywords
-        confused_phrases = ["don't know", "dont know", "confused", "not sure", "no idea", "can't measure", "cant measure"]
+        confused_phrases = [
+            "don't know", "dont know", "confused", "not sure", "no idea", "can't measure", "cant measure",
+            "skip", "can we skip", "any size", "you decide", "whatever size", "no dimensions", "dont have dimensions"
+        ]
         if any(p in cleaned for p in confused_phrases):
             # If length and width are already known, and user doesn't know height, default height to 280 cm!
             if current_l and current_w and not current_h:
