@@ -85,6 +85,20 @@ class CatalogAgent:
         lower_input = raw.lower()
         cleaned_input = re.sub(r"\b(style|look|aesthetic|vibe|theme|design|interior|please)\b", "", lower_input).strip()
 
+        # Affirmative and acceptance phrases when agent recommends a style (e.g. 'yeah works', 'that works')
+        affirmative_styles = [
+            "yeah works", "that works", "works for me", "works", "sure works", "yeah that works",
+            "yes that works", "sounds good", "sounds good to me", "sounds great", "sure", "ok", "okay",
+            "perfect", "fine", "thats fine", "that's fine", "go ahead", "proceed", "yes", "yeah", "yup",
+            "yep", "agreed", "this works", "all of these work", "yes please", "sure thing", "looks good",
+            "let's do it", "lets do it", "anything works", "whatever works", "all good", "approved", "looks perfect"
+        ]
+        if any(lower_input == a or lower_input.startswith(a + " ") or a in lower_input for a in affirmative_styles) or lower_input in ["yeah", "yes", "sure", "ok", "okay", "works", "fine"]:
+            return True, "Scandinavian", []
+
+        if any(w in lower_input for w in ["affordable", "cheapest", "cheap", "budget friendly", "budget-friendly", "cost effective", "low cost", "economical"]):
+            return True, "Minimalist", []
+
         def norm(text: str) -> str:
             return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
@@ -195,9 +209,13 @@ class CatalogAgent:
             "all", "all of these", "everything", "standard", "standard items", "any", "don't know", "dont know",
             "confused", "skip", "none", "no must-haves", "no must haves", "nothing", "nothing specific",
             "no preference", "you decide", "you choose", "whatever", "surprise me", "choose any style",
-            "whichever affordable", "affordable", "cheap", "budget friendly", "whatever you suggest"
+            "whichever affordable", "affordable", "cheap", "budget friendly", "whatever you suggest",
+            "yeah works", "that works", "works for me", "works", "sure works", "yeah that works",
+            "yes that works", "sounds good", "sounds good to me", "sure", "ok", "okay", "perfect",
+            "fine", "thats fine", "that's fine", "go ahead", "proceed", "yes", "yeah", "yup", "yep",
+            "agreed", "this works", "all of these work", "yes please", "sure thing", "sounds great", "looks good"
         ]
-        if any(lower == g or lower.startswith(g + " ") for g in generic_tokens) or lower in ["skip", "none"]:
+        if any(lower == g or lower.startswith(g + " ") for g in generic_tokens) or lower in ["skip", "none", "yeah", "yes", "sure", "ok", "okay", "works"]:
             avail_cats = []
             for item in boq_items:
                 c = item.get("category")
@@ -307,7 +325,7 @@ class CatalogAgent:
         unavailable = []
         for cand in candidates:
             cand_low = cand.lower().strip("?.!,")
-            if any(cand_low == g or cand_low.startswith(g + " ") for g in generic_tokens):
+            if any(cand_low == g or cand_low.startswith(g + " ") or g in cand_low for g in generic_tokens) or cand_low in ["skip", "none", "yeah", "yes", "sure", "ok", "okay", "works", "fine"]:
                 continue
             mapped = synonyms.get(cand_low, cand_low)
             matched = False

@@ -86,23 +86,39 @@ class ConversationAgent:
         if self._is_pure_parameter(clean):
             return False
 
-        # In STYLE stage, let deterministic style validation handle direct style attempts (e.g. "Gothic", "Art Deco", "Scandinavian")
+        affirmative_tokens = [
+            "yeah works", "that works", "works for me", "works", "sure works", "yeah that works",
+            "yes that works", "sounds good", "sounds good to me", "sounds great", "sure", "ok", "okay",
+            "perfect", "fine", "thats fine", "that's fine", "go ahead", "proceed", "yes", "yeah", "yup",
+            "yep", "agreed", "this works", "all of these work", "yes please", "sure thing", "looks good",
+            "let's do it", "lets do it", "anything works", "whatever works", "all good", "approved", "looks perfect"
+        ]
+
+        # In STYLE stage, let deterministic style validation handle direct style attempts or affirmative responses (e.g. "yeah works", "Scandinavian")
         if stage == "STYLE":
+            if any(lower == a or lower.startswith(a + " ") or a in lower for a in affirmative_tokens) or lower in ["yeah", "yes", "sure", "ok", "okay", "works", "fine"]:
+                return False
             hesitation_tokens = ["don't know", "dont know", "not sure", "confused", "no idea", "what do you recommend", "suggest", "choice", "help me choose", "you choose", "choose for me", "surprise me", "options", "what styles", "which style"]
             if "?" not in clean and not any(h in lower for h in hesitation_tokens):
                 return False
 
         # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked for general advice
         if stage == "MUST_HAVES" or ("," in clean and len(clean.split(",")) >= 2):
+            if any(lower == a or lower.startswith(a + " ") or a in lower for a in affirmative_tokens) or lower in ["yeah", "yes", "sure", "ok", "okay", "works", "fine"]:
+                return False
             hesitation_tokens = ["don't know", "dont know", "not sure", "confused", "no idea", "what do people choose", "suggest must haves", "what do you recommend", "help me choose"]
             if not any(h in lower for h in hesitation_tokens):
                 return False
 
-        # In PLAN_GENERATED / PLAN_REVISION, let deterministic tools handle add/remove/swap/cheaper/reset commands
+        # In PLAN_GENERATED / PLAN_REVISION, let deterministic tools handle add/remove/swap/cheaper/reset/confirm commands
         if stage in ["PLAN_GENERATED", "PLAN_REVISION"]:
             if self._extract_add_target(clean) or self._extract_remove_target(clean):
                 return False
-            if any(w in lower for w in ["swap", "replace", "reduce", "cheaper", "start over", "restart", "looks great", "looks perfect", "confirm plan", "proceed"]):
+            if any(w in lower for w in [
+                "swap", "replace", "reduce", "cheaper", "start over", "restart",
+                "looks great", "looks perfect", "looks good", "confirm plan", "proceed",
+                "yeah works", "that works", "works for me", "works", "sounds good", "perfect", "fine"
+            ]) or lower in ["yeah", "yes", "sure", "ok", "okay", "works", "fine"]:
                 return False
 
         # If user message is just a standalone greeting ("hi", "hello") at GREETING stage, let standard opening flow handle it
@@ -187,7 +203,14 @@ class ConversationAgent:
                 new_updates["stage"] = "STYLE"
 
         if extracted.get("style"):
-            is_valid, matched, alts = self.catalog_agent.validate_style(extracted["style"])
+            extracted_style = str(extracted["style"]).strip()
+            if any(p in extracted_style.lower() for p in ["yeah", "works", "affirmative", "agree", "sure", "ok", "fine", "good", "recommend", "suggest", "choice"]):
+                matched = "Scandinavian"
+                is_valid = True
+                alts = []
+            else:
+                is_valid, matched, alts = self.catalog_agent.validate_style(extracted_style)
+
             if is_valid and matched:
                 new_updates["style"] = matched
                 if current_stage in ["GREETING", "ROOM_TYPE", "DIMENSIONS", "BUDGET", "STYLE"]:
@@ -246,9 +269,20 @@ class ConversationAgent:
             # Format standardized deterministic BOQ response rather than Gemini freeform essay
             coverage = self.catalog_agent.check_must_haves_coverage(user_text, current_plan.get("boq", []), room_type=room_t)
             # Filter generic / non-item tokens from coverage
-            skip_phrases = ["skip", "none", "no must-haves", "no must haves", "nothing specific", "no preference", "choose any style", "whichever affordable", "affordable", "surprise me"]
+            skip_phrases = [
+                "skip", "none", "no must-haves", "no must haves", "nothing specific", "no preference",
+                "choose any style", "whichever affordable", "affordable", "surprise me",
+                "yeah works", "that works", "works for me", "works", "sure works", "yeah that works",
+                "yes that works", "sounds good", "sounds good to me", "sounds great", "sure", "ok", "okay",
+                "perfect", "fine", "thats fine", "that's fine", "go ahead", "proceed", "yes", "yeah", "yup",
+                "yep", "agreed", "this works", "all of these work", "yes please", "sure thing", "looks good"
+            ]
             if coverage.get("unavailable_items"):
-                clean_unavail = [u for u in coverage["unavailable_items"] if u.lower().strip("?.!,") not in skip_phrases]
+                clean_unavail = [
+                    u for u in coverage["unavailable_items"]
+                    if not any(u.lower().strip("?.!,") == g or g in u.lower() for g in skip_phrases)
+                    and not any(w in u.lower() for w in ["yeah", "works", "sure", "ok", "fine", "good", "perfect", "standard"])
+                ]
                 coverage["unavailable_items"] = clean_unavail
                 coverage["has_unavailable"] = len(clean_unavail) > 0
 
@@ -535,7 +569,17 @@ class ConversationAgent:
 
             wants_affordable = any(w in lower_text for w in affordable_phrases)
             wants_auto_style = any(p in lower_text for p in confused_phrases) or "whichever" in lower_text or "any" in lower_text or wants_affordable
-            affirmative_phrases = ["yeah", "yes", "sure", "ok", "okay", "yup", "yep", "go ahead", "sounds good", "let's do it", "lets do it", "that works", "perfect"]
+            affirmative_phrases = [
+                "yeah works", "that works", "works for me", "works", "sure works", "yeah that works",
+                "yes that works", "sounds good", "sounds good to me", "sounds great", "sure", "ok", "okay",
+                "perfect", "fine", "thats fine", "that's fine", "go ahead", "proceed", "yes", "yeah", "yup",
+                "yep", "agreed", "this works", "all of these work", "yes please", "sure thing", "looks good",
+                "let's do it", "lets do it", "anything works", "whatever works", "all good", "approved", "looks perfect"
+            ]
+            is_affirmative = (
+                any(lower_text == a or lower_text.startswith(a + " ") or a in lower_text for a in affirmative_phrases)
+                or lower_text in ["yeah", "yes", "sure", "ok", "okay", "works", "fine"]
+            )
 
             if wants_auto_style:
                 # Select appropriate style
@@ -557,7 +601,7 @@ class ConversationAgent:
                 )
                 metadata["chips"] = default_must_haves + ["All of these", "Skip must-haves"]
                 metadata["stage"] = "MUST_HAVES"
-            elif lower_text in affirmative_phrases:
+            elif is_affirmative:
                 # User affirmed default recommendation (e.g. Scandinavian)
                 matched_style = "Scandinavian"
                 db.update_session(session_id, db_path=self.db_path, style=matched_style, stage="MUST_HAVES")
@@ -606,12 +650,20 @@ class ConversationAgent:
             room_t = session.get("room_type", "Living Room")
             default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
 
-            # Check if user skips must-haves
-            skip_tokens = [
+            # Check if user skips must-haves or provides an affirmative agreement
+            affirmative_and_skip_tokens = [
                 "skip", "none", "no must-haves", "no must haves", "nothing specific", "no preference",
-                "you decide", "you choose", "whatever you suggest", "standard items", "standard", "all", "all of these", "whatever"
+                "you decide", "you choose", "whatever you suggest", "standard items", "standard", "all", "all of these", "whatever",
+                "yeah works", "that works", "works for me", "works", "sure works", "yeah that works",
+                "yes that works", "sounds good", "sounds good to me", "sounds great", "sure", "ok", "okay",
+                "perfect", "fine", "thats fine", "that's fine", "go ahead", "proceed", "yes", "yeah", "yup",
+                "yep", "agreed", "this works", "all of these work", "yes please", "sure thing", "looks good",
+                "let's do it", "lets do it", "all of them", "approved", "looks perfect", "all good", "all these work"
             ]
-            is_skipped = any(p == lower_text or lower_text.startswith(p + " ") for p in skip_tokens) or lower_text in ["skip", "none"]
+            is_skipped = (
+                any(p == lower_text or lower_text.startswith(p + " ") or p in lower_text for p in affirmative_and_skip_tokens)
+                or lower_text in ["skip", "none", "yeah", "yes", "sure", "ok", "okay", "works", "fine"]
+            )
 
             # Parse negative constraints (e.g. "no tv", "don't add coffee table", "without rug")
             neg_patterns = [
@@ -668,9 +720,9 @@ class ConversationAgent:
                         if curr:
                             sub_list.append(" ".join(curr))
                         for s in sub_list:
-                            if len(s) >= 2 and s.lower() not in skip_tokens:
+                            if len(s) >= 2 and not any(s.lower() == g or g in s.lower() for g in affirmative_and_skip_tokens):
                                 extracted_items.append(s.strip())
-                    elif len(c) >= 2 and c.lower() not in skip_tokens:
+                    elif len(c) >= 2 and not any(c.lower() == g or g in c.lower() for g in affirmative_and_skip_tokens):
                         extracted_items.append(c)
 
                 must_haves_list = extracted_items if extracted_items else default_must_haves
@@ -705,7 +757,8 @@ class ConversationAgent:
             if coverage.get("unavailable_items"):
                 clean_unavail = [
                     u for u in coverage["unavailable_items"]
-                    if u.lower().strip("?.!,") not in skip_tokens
+                    if not any(u.lower().strip("?.!,") == g or g in u.lower() for g in affirmative_and_skip_tokens)
+                    and not any(w in u.lower() for w in ["yeah", "works", "sure", "ok", "fine", "good", "perfect", "standard"])
                 ]
                 coverage["unavailable_items"] = clean_unavail
                 coverage["has_unavailable"] = len(clean_unavail) > 0
@@ -718,7 +771,10 @@ class ConversationAgent:
                     f"Here is your customized interior design plan with the available items: {avail_str}."
                 )
             else:
-                intro_text = f"🎉 Here is your customized interior design plan for your {room_t}!"
+                if is_skipped:
+                    intro_text = f"🎉 Here is your customized interior design plan for your {room_t} featuring our complete curated package!"
+                else:
+                    intro_text = f"🎉 Here is your customized interior design plan for your {room_t}!"
                 # Explicitly summarize requested must-haves included in the plan
                 included_matches = []
                 for b_item in boq:
@@ -737,7 +793,7 @@ class ConversationAgent:
                             if line not in included_matches:
                                 included_matches.append(line)
                             break
-                if included_matches and len(must_haves_list) > 1 and "all" not in lower_text:
+                if not is_skipped and included_matches and len(must_haves_list) > 1 and "all" not in lower_text:
                     intro_text += f"\n\n**Included from your requested must-haves:**\n" + "\n".join(included_matches)
 
             # Brand substitutions note if applicable
@@ -811,7 +867,11 @@ class ConversationAgent:
                 metadata["stage"] = "ROOM_TYPE"
 
             # 2. Confirmation
-            elif any(p in lower_text for p in ["looks great", "looks perfect", "looks good", "confirm plan", "proceed", "finalize", "i like it"]):
+            elif any(p in lower_text for p in [
+                "looks great", "looks perfect", "looks good", "confirm plan", "proceed", "finalize", "i like it",
+                "yeah works", "that works", "works for me", "works", "sure works", "sounds good", "perfect",
+                "fine", "thats fine", "that's fine", "all good", "approved", "this works", "all of these work"
+            ]) or lower_text in ["yeah", "yes", "sure", "ok", "okay", "works", "fine"]:
                 self._auto_score_session(session_id)
                 response_text = (
                     "🎉 Fantastic! Your customized BOQ interior plan is confirmed and ready. "
