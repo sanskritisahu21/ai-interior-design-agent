@@ -230,13 +230,37 @@ class CatalogAgent:
             "television": "tv unit",
             "tv stand": "tv unit",
             "media console": "tv unit",
+            "tv console": "tv unit",
             "couch": "sofa",
+            "couches": "sofa",
+            "sofas": "sofa",
             "center table": "coffee table",
             "tea table": "coffee table",
             "standing lamp": "floor lamp",
             "reading lamp": "table lamp",
+            "lamp": "floor lamp",
+            "lamps": "floor lamp",
+            "light": "floor lamp",
+            "lights": "floor lamp",
+            "lighting": "floor lamp",
             "closet": "wardrobe",
-            "almirah": "wardrobe"
+            "almirah": "wardrobe",
+            "cupboard": "wardrobe",
+            "plant": "planter",
+            "plants": "planter",
+            "planter": "planter",
+            "planters": "planter",
+            "greenery": "planter",
+            "pot": "planter",
+            "pots": "planter",
+            "curtain": "curtains",
+            "curtains": "curtains",
+            "drapes": "curtains",
+            "rugs": "rug",
+            "arm chair": "armchair",
+            "arm chairs": "armchair",
+            "accent chair": "armchair",
+            "chairs": "dining chair" if "dining" in room_type.lower() else "armchair"
         }
 
         unavailable = []
@@ -245,16 +269,20 @@ class CatalogAgent:
             mapped = synonyms.get(cand_low, cand_low)
             matched = False
             for cat in boq_cats:
-                if mapped in cat or cat in mapped:
+                if mapped in cat or cat in mapped or cand_low in cat:
                     matched = True
                     break
             if not matched:
                 for name in boq_names:
-                    if mapped in name or name in mapped:
+                    if mapped in name or name in mapped or cand_low in name:
                         matched = True
                         break
             if not matched:
-                unavailable.append(cand)
+                # Check if item exists in catalog for room
+                # If cand is in brand subs or known unsupported (like soft lighting, chandelier, jacuzzi), verify
+                cat_probe = self.find_catalog_item_for_room(cand, room_type=room_type)
+                if not cat_probe:
+                    unavailable.append(cand)
 
         avail_cats = []
         for item in boq_items:
@@ -367,8 +395,6 @@ class CatalogAgent:
             "curtain": "curtains",
             "curtains": "curtains",
             "drapes": "curtains",
-            "carpet": "rug",
-            "carpets": "rug",
             "rug": "rug",
             "rugs": "rug",
             "couch": "sofa",

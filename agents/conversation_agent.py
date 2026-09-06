@@ -86,6 +86,12 @@ class ConversationAgent:
         if self._is_pure_parameter(clean):
             return False
 
+        # In STYLE stage, let deterministic style validation handle direct style attempts (e.g. "Gothic", "Art Deco", "Scandinavian")
+        if stage == "STYLE":
+            hesitation_tokens = ["don't know", "dont know", "not sure", "confused", "no idea", "what do you recommend", "suggest", "choice", "help me choose", "you choose", "choose for me", "surprise me", "options", "what styles", "which style"]
+            if "?" not in clean and not any(h in lower for h in hesitation_tokens):
+                return False
+
         # In MUST_HAVES or if text is a comma-separated item list, let deterministic coverage handle it unless user asked a question
         if stage == "MUST_HAVES" or ("," in clean and len(clean.split(",")) >= 2):
             if "?" not in clean:
@@ -170,11 +176,16 @@ class ConversationAgent:
                 new_updates["stage"] = "STYLE"
 
         if extracted.get("style"):
-            is_valid, matched, _ = self.catalog_agent.validate_style(extracted["style"])
+            is_valid, matched, alts = self.catalog_agent.validate_style(extracted["style"])
             if is_valid and matched:
                 new_updates["style"] = matched
                 if current_stage in ["GREETING", "ROOM_TYPE", "DIMENSIONS", "BUDGET", "STYLE"]:
                     new_updates["stage"] = "MUST_HAVES"
+            else:
+                clean_style = re.sub(r"[^a-zA-Z0-9\s\-]", "", extracted["style"]).strip()
+                alts_str = ", ".join(alts[:3]) if alts else "Scandinavian, Mid-Century, Contemporary"
+                reply_text = f"We don't have {clean_style} style currently. Do you want to try from {alts_str} styles?"
+                chips = alts or ["Scandinavian", "Mid-Century", "Contemporary", "Bohemian"]
 
         if extracted.get("must_haves"):
             if isinstance(extracted["must_haves"], list):
@@ -209,6 +220,33 @@ class ConversationAgent:
             db.update_session(session_id, db_path=self.db_path, current_plan_json=json.dumps(current_plan), stage="PLAN_REVISION")
             self._auto_score_session(session_id)
             metadata["stage"] = "PLAN_REVISION"
+
+            # Format standardized deterministic BOQ response rather than Gemini freeform essay
+            coverage = self.catalog_agent.check_must_haves_coverage(user_text, current_plan.get("boq", []), room_type=room_t)
+            if coverage["has_unavailable"]:
+                unavail_str = ", ".join(coverage["unavailable_items"])
+                avail_str = ", ".join(coverage["available_items"])
+                intro_text = (
+                    f"We don't have {unavail_str} in our catalog for {room_t}.\n"
+                    f"Here is your customized interior design plan with the available items: {avail_str}."
+                )
+            else:
+                intro_text = f"🎉 Here is your customized interior design plan for your {room_t}!"
+
+            recs = current_plan.get("recommendations", {})
+            rec_item = recs.get("item_recommendation", "")
+            rec_style = recs.get("style_recommendation", "")
+            rec_color = recs.get("color_recommendation", "")
+
+            reply_text = (
+                f"{intro_text}\n\n"
+                f"💡 Recommendations:\n"
+                f"• Items: {rec_item}\n"
+                f"• Style: {rec_style}\n"
+                f"• Color & Finish: {rec_color}\n\n"
+                "Review the complete 9-field itemized Bill of Quantities (BOQ) below. Would you like to swap any items, change styles, or adjust the budget?"
+            )
+            chips = ["Looks great!", "Can we reduce budget?", "Swap sofa", "Start over"]
 
         if current_plan:
             metadata["plan"] = current_plan
@@ -808,8 +846,17 @@ class ConversationAgent:
                     added_names = ", ".join([f"{it['name']} ({it['category']})" for it in added_items])
                     missing_msg = f"\n(Note: We don't have {', '.join(missing_items)} in our catalog for {room_t})" if missing_items else ""
 
+                    spatial = plan.get("spatial_fit_summary", {})
+                    spatial_alert = ""
+                    if not spatial.get("circulation_viable", True):
+                        spatial_alert = f"\n⚠️ Spatial Notice: Furniture footprint is at {spatial.get('occupancy_percentage', 'elevated level')}. Walkway circulation may be tight."
+
+                    budget_alert = ""
+                    if rem_b < 0:
+                        budget_alert = f"\n⚠️ Budget Notice: This addition exceeds your allocated budget of ₹{budget_val:,} by ₹{abs(rem_b):,}."
+
                     response_text = (
-                        f"✅ Added {added_names} to your design plan!{missing_msg}\n"
+                        f"✅ Added {added_names} to your design plan!{missing_msg}{budget_alert}{spatial_alert}\n"
                         f"Your updated total spend is {b_status}.\n\n"
                         f"💡 Recommendations:\n"
                         f"• Items: {recs.get('item_recommendation', '')}\n"
@@ -929,7 +976,51 @@ class ConversationAgent:
             brief_payload["must_haves"] = ""
             fallback_res = agent.run(brief_payload)
             if fallback_res.get("boq"):
-                return fallback_res
+                res = fallback_res
+
+        # Ensure any explicitly requested must-haves present in catalog are included in the plan
+        user_musts = []
+        raw_musts = session.get("must_haves") or ""
+        if raw_musts:
+            try:
+                parsed_m = json.loads(raw_musts)
+                if isinstance(parsed_m, list):
+                    user_musts.extend([str(x) for x in parsed_m])
+                elif isinstance(parsed_m, str):
+                    user_musts.extend(re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', parsed_m))
+            except Exception:
+                user_musts.extend(re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', str(raw_musts)))
+
+        if notes:
+            user_musts.extend(re.split(r'[,;\n]|\band\b|\b\+\b|\b&\b', str(notes)))
+
+        boq = res.get("boq", [])
+        existing_cats = {it.get("category", "").lower() for it in boq}
+        existing_ids = {it.get("item_id") for it in boq}
+        added_any = False
+
+        generic_skips = {"all", "everything", "standard", "any", "living room", "bedroom", "dining", "study", "yes", "yeah", "ok", "please", "room", "sofa", "furniture"}
+
+        for req in user_musts:
+            clean_req = re.sub(r'^(?:i want|i need|please add|give me|we want|looking for|also|with|a|an|the|some)\s+', '', req.strip(), flags=re.I).strip()
+            if len(clean_req) < 3 or clean_req.lower() in generic_skips:
+                continue
+
+            # Check if this item exists in catalog for this room
+            cat_found = self.catalog_agent.find_catalog_item_for_room(clean_req, room_type=room_type, style=style)
+            if cat_found:
+                c_cat = (cat_found.get("category") or "").lower()
+                c_id = cat_found.get("item_id")
+                if c_id not in existing_ids and c_cat not in existing_cats:
+                    boq.append(self._create_boq_row(cat_found, preferred_style=style))
+                    existing_cats.add(c_cat)
+                    existing_ids.add(c_id)
+                    added_any = True
+
+        if added_any:
+            res["boq"] = boq
+            res = self._recalculate_plan_metrics(res, length_cm, width_cm, budget, style, room_type=room_type)
+
         return res
 
     def _create_boq_row(self, catalog_item: Dict[str, Any], preferred_style: str = "Scandinavian") -> Dict[str, Any]:
@@ -979,7 +1070,7 @@ class ConversationAgent:
         """Extracts addition target keyword from diverse user adding phrasings."""
         # 1. Why didn't you add / why are you not adding X
         m_why = re.search(
-            r"\b(?:why are you not adding|why aren't you adding|why arent you adding|why didn't you add|why didnt you add|why haven't you added|why havent you added|why not add|why you didn't add|why you didnt add)\s+(?:a\s+|an\s+|the\s+)?([a-z0-9\s\-]+)",
+            r"\b(?:why are you not adding|why aren't you adding|why arent you adding|why didn't you add|why didnt you add|why haven't you added|why havent you added|why not add|why you didn't add|why you didnt add)\s+(?:a\s+|an\s+|the\s+)?(.+)",
             text,
             re.I
         )
@@ -988,7 +1079,7 @@ class ConversationAgent:
 
         # 2. I said add X / i asked to add X / i told to add X
         m_asked = re.search(
-            r"\b(?:i said|i asked to|i told to|i want to|i'd like to|can we|could you|please|let's|also)\s+(?:add|include|put in|insert)\s+(?:a\s+|an\s+|the\s+|some\s+)?([a-z0-9\s\-]+)",
+            r"\b(?:i said|i asked to|i told to|i want to|i'd like to|can we|could you|please|let's|also)\s+(?:add|include|put in|insert)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
             text,
             re.I
         )
@@ -1006,7 +1097,7 @@ class ConversationAgent:
 
         # 4. Want X / Need X
         m_want = re.search(
-            r"\b(?:want|need|get)\s+(?:a\s+|an\s+|the\s+|some\s+)?([a-z0-9\s\-]+)",
+            r"\b(?:want|need|get)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)",
             text,
             re.I
         )
