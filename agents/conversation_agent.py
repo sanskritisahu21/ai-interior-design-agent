@@ -63,97 +63,6 @@ class ConversationAgent:
         except Exception:
             pass
 
-    def _check_negative_guardrails(self, text: str) -> Optional[Tuple[str, str]]:
-        """
-        Pre-flight negative guardrail audit across:
-        1. Commentary on personality, community, politics, cinema, country
-        2. Role hijacking / coding / external task refusal
-        3. Core code, API keys, RAG architecture, system prompt leaking
-        4. Inquiries beyond interior design planning
-        """
-        lower = text.lower()
-
-        # Guardrail 6: Do not comment on any personality, community, politics, cinema, country
-        political_entities = [
-            "modi", "rahul gandhi", "bjp", "congress", "aap", "trump", "biden",
-            "election", "politics", "political", "prime minister", "president",
-            "democracy", "dictator", "communism", "capitalism", "socialism"
-        ]
-        community_religion = [
-            "hindu", "muslim", "christian", "sikh", "islam", "judaism", "caste",
-            "brahmin", "dalit", "race", "ethnicity", "religion"
-        ]
-        cinema_celebrities = [
-            "bollywood", "hollywood", "cinema", "movie review", "shah rukh",
-            "salman khan", "amitabh", "deepika", "tom cruise", "actor", "actress",
-            "box office", "film industry"
-        ]
-        country_geopolitics = [
-            "pakistan", "china war", "russia ukraine", "geopolitics", "foreign policy",
-            "which country is better", "hate country", "invade", "israel", "palestine"
-        ]
-        
-        commentary_triggers = [
-            "what do you think of", "who is better", "your opinion on", "do you support",
-            "comment on", "tell me about", "who should i vote", "is good or bad", "favorite actor",
-            "favorite movie", "favorite country"
-        ]
-        
-        has_commentary_intent = any(ct in lower for ct in commentary_triggers)
-        has_forbidden_entity = any(p in lower for p in political_entities + community_religion + cinema_celebrities + country_geopolitics)
-
-        if (has_commentary_intent and has_forbidden_entity) or \
-           any(p in lower for p in ["who will win election", "modi vs", "trump vs", "hindu vs muslim", "which country is best"]):
-            return (
-                "NEUTRALITY_BREACH",
-                "As an autonomous interior design consultant for Interior Company × Blocks, I maintain strict neutrality and do not comment on personalities, communities, politics, cinema, or countries. Let's refocus on planning and designing your space!"
-            )
-
-        # Guardrail 7: Do not work on any role assigned apart from given assigned role / coding
-        role_hijack_patterns = [
-            r"\b(write|generate|debug|fix|create)\s+(a\s+)?(python|javascript|java|c\+\+|html|css|sql|rust|php|ruby|bash|code|script|algorithm|regex)\b",
-            r"\b(solve|calculate)\s+(calculus|math problem|equation|algebra|differential)\b",
-            r"\b(act as|pretend to be|roleplay as|you are now)\s+(a software engineer|a doctor|a lawyer|a therapist|a linux terminal|dan|jailbreak)\b",
-            r"\b(do my homework|write an essay on|write poetry about|compose a song)\b"
-        ]
-        for pat in role_hijack_patterns:
-            if re.search(pat, lower):
-                return (
-                    "ROLE_HIJACK_REFUSAL",
-                    "I cannot take on external roles or coding tasks. My dedicated and exclusive role is Siya, an autonomous interior design consultant for Interior Company × Blocks. How can I assist with your room layout, furniture, or decor?"
-                )
-
-        # Guardrail 8: Do not share your core code, API documentation, API keys, RAG, Prompt etc.
-        leak_patterns = [
-            r"\b(system prompt|initial prompt|hidden prompt|developer prompt|prompt template)\b",
-            r"\b(show|reveal|display|print|share|dump|leak|give)\s+(your\s+)?(code|source code|api key|apikey|secret|rag|instructions|database schema|system prompt)\b",
-            r"\b(api documentation|postman collection|backend endpoint list|api credentials)\b",
-            r"\b(ignore previous instructions and (show|print|tell))\b"
-        ]
-        for pat in leak_patterns:
-            if re.search(pat, lower):
-                return (
-                    "CONFIDENTIALITY_BREACH",
-                    "I cannot disclose core code, API keys, system prompts, RAG architecture, or internal technical documentation. These are confidential operational assets of Interior Company × Blocks. Let's return to your interior design plan."
-                )
-
-        # Guardrail 9: Do not go beyond the field interior design planning
-        out_of_domain_patterns = [
-            r"\b(medical diagnosis|symptom checker|prescribe medicine|what disease do i have|cure headache)\b",
-            r"\b(legal advice|sue my landlord|draft a contract|court case|file a lawsuit)\b",
-            r"\b(stock recommendation|crypto trading|forex trading|invest in bitcoin|buy stocks)\b",
-            r"\b(how to fix my car engine|car transmission repair|replace brake pads)\b",
-            r"\b(cook biryani recipe|baking cake recipe|travel itinerary for paris)\b"
-        ]
-        for pat in out_of_domain_patterns:
-            if re.search(pat, lower):
-                return (
-                    "OUT_OF_DOMAIN_REFUSAL",
-                    "I am exclusively specialized in interior design planning and furniture layouts. I cannot provide advice outside this domain. Please let me know what room or interior space you would like to design!"
-                )
-
-        return None
-
     def _is_pure_parameter(self, text: str) -> bool:
         """Checks if text is a single direct parameter like 'Living Room', '200 290 310', '200000', 'Scandinavian'."""
         clean = text.strip()
@@ -547,9 +456,9 @@ class ConversationAgent:
                 room_t = session.get("room_type", "Living Room")
                 default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
                 response_text = (
-                    f"Awesome! We will style your {room_t} with a timeless {matched_style} aesthetic. "
-                    f"What are your must-haves in your {room_t}? "
-                    f"For this room, customers typically choose: {', '.join(default_must_haves)}."
+                    f"Understood. We will design your {room_t} with a refined {matched_style} aesthetic. "
+                    f"What are your essential must-have items for this {room_t}? "
+                    f"Clients commonly select: {', '.join(default_must_haves)}."
                 )
                 metadata["chips"] = default_must_haves + ["All of these"]
                 metadata["stage"] = "MUST_HAVES"
@@ -561,8 +470,8 @@ class ConversationAgent:
                 # Suggest styles from DB
                 suggested_styles = ["Scandinavian", "Mid-Century", "Contemporary", "Bohemian"]
                 response_text = (
-                    f"No worries at all! Here are some popular styles from our catalog: {', '.join(suggested_styles)}. "
-                    "Which one of these resonates with you, or shall we go with a timeless Scandinavian look?"
+                    f"Certainly. Here are our featured interior styles from the catalog: {', '.join(suggested_styles)}. "
+                    "Which aesthetic do you prefer, or shall we proceed with a signature Scandinavian design?"
                 )
                 metadata["chips"] = suggested_styles
             else:
@@ -574,9 +483,9 @@ class ConversationAgent:
                     default_must_haves = self.catalog_agent.get_room_must_haves_suggestions(room_t)
 
                     response_text = (
-                        f"I love the {matched_style} aesthetic! "
-                        f"What are your must-haves in your {room_t}? "
-                        f"For this room, customers typically choose: {', '.join(default_must_haves)}."
+                        f"A {matched_style} aesthetic is an excellent choice for your {room_t}. "
+                        f"What are your essential must-haves for this room? "
+                        f"Clients commonly select: {', '.join(default_must_haves)}."
                     )
                     metadata["chips"] = default_must_haves + ["All of these"]
                     metadata["stage"] = "MUST_HAVES"
@@ -1313,6 +1222,29 @@ class ConversationAgent:
             return None
 
         clean_lower = text.lower().strip()
+
+        # -------------------------------------------------------------
+        # 0. Inappropriate & Sexual Content Refusal Gate
+        # -------------------------------------------------------------
+        # Exclude legitimate interior design styling terms like 'nude color palette' or 'nude shades'
+        has_nude_decor = bool(re.search(r"\b(nude\s+(color|palette|shade|tone|wall|paint|cushion|fabric|linen|finish|interior|aesthetic))\b", clean_lower))
+        sexual_patterns = [
+            r"\b(sex|sexual|sexy|nude|nudes|naked|nudity|porn|pornography|erotic|erotica|nsfw|fetish)\b",
+            r"\b(send\s+(me\s+)?(nudes|sexy\s+pics|naked\s+photos)|show\s+(me\s+)?(your\s+)?(body|boobs|ass|tits))\b",
+            r"\b(talk\s+dirty|dirty\s+talk|are\s+you\s+(horny|virgin)|want\s+to\s+have\s+sex|make\s+love)\b",
+            r"\b(kiss\s+me|touch\s+(yourself|me)|sexual\s+(pleasure|fantas(y|ies)|act|desire))\b",
+            r"\b(penis|vagina|boobs|breasts|genitals|masturbat(e|ion)|intercourse|orgasm)\b"
+        ]
+        if not has_nude_decor:
+            for pattern in sexual_patterns:
+                if re.search(pattern, clean_lower):
+                    refusal_msg = (
+                        "🛡️ Professional Decorum: As an AI Interior Design Consultant for Interior Company × Blocks, "
+                        "I maintain strict professional boundaries and do not engage in sexual, romantic, or inappropriate conversations. "
+                        "I am exclusively dedicated to interior space planning, furniture selections, and architectural aesthetics. "
+                        "Please let me know how I may assist with your home design."
+                    )
+                    return ("SEXUAL_CONTENT_REFUSAL", refusal_msg)
 
         # -------------------------------------------------------------
         # 1. IP & Confidentiality Gate (Guardrail 8 / Rule 3)
